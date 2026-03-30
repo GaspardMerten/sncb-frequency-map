@@ -80,8 +80,8 @@ def render_sidebar_filters():
     """Render shared sidebar filters and return the computed state dict.
 
     Returns a dict with keys: token, start_date, end_date, weekdays, hour_filter,
-    day_count, all_dates, exclude_pub, exclude_sch.
-    Returns None if any required input is missing (st.stop() called).
+    day_count, all_dates, exclude_pub, exclude_sch, day_labels.
+    Calls st.stop() if any required input is missing.
     """
     day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -101,7 +101,7 @@ def render_sidebar_filters():
         today = date.today()
         dc1, dc2 = st.columns(2)
         with dc1:
-            start_date = st.date_input("From", value=date(2025, 3, 1),
+            start_date = st.date_input("From", value=today - timedelta(days=7),
                                        min_value=date(2024, 8, 21), max_value=today)
         with dc2:
             end_date = st.date_input("To", value=today,
@@ -196,10 +196,12 @@ def render_sidebar_filters():
 
 
 def load_all_data(filters: dict):
-    """Fetch and process all data based on filters. Returns a state dict.
+    """Fetch and process all shared data. Shows a loading indicator."""
+    with st.spinner("Loading data..."):
+        return _load_all_data_inner(filters)
 
-    Cached via st.cache_data where possible; the heavy work (API calls) is cached.
-    """
+
+def _load_all_data_inner(filters: dict):
     ts = int(datetime(filters["start_date"].year, filters["start_date"].month, 1).timestamp())
     token = filters["token"]
 
