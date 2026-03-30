@@ -10,7 +10,7 @@ from .api import fetch_gtfs, fetch_infrabel_segments, fetch_operational_points
 from .holidays import (
     public_holidays_in_range, school_holidays_in_range, SCHOOL_HOLIDAYS,
 )
-from .gtfs import get_active_service_ids, build_stop_lookup, compute_segment_frequencies
+from .gtfs import get_active_service_ids, get_service_day_counts, build_stop_lookup, compute_segment_frequencies
 from .matching import build_gtfs_to_infra_mapping, build_infra_graph
 
 load_dotenv()
@@ -223,10 +223,12 @@ def load_all_data(filters: dict):
     except Exception:
         op_points = None
 
-    service_ids = get_active_service_ids(gtfs, filters["all_dates"])
+    service_day_counts = get_service_day_counts(gtfs, filters["all_dates"])
+    service_ids = set(service_day_counts.keys())
     if not service_ids:
         st.warning("No active services found. Trying all...")
         service_ids = set(gtfs["trips"]["service_id"].unique())
+        service_day_counts = {sid: 1 for sid in service_ids}
 
     stop_lookup = build_stop_lookup(gtfs)
     gtfs_to_infra = build_gtfs_to_infra_mapping(stop_lookup, op_points, buffer_km=1.0)
@@ -237,6 +239,7 @@ def load_all_data(filters: dict):
         "op_points": op_points,
         "prov_geo": prov_geo,
         "service_ids": service_ids,
+        "service_day_counts": service_day_counts,
         "stop_lookup": stop_lookup,
         "gtfs_to_infra": gtfs_to_infra,
         "ts": ts,

@@ -8,7 +8,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
-from logic.geo import build_region_geojson, PROVINCE_TO_REGION
+from logic.geo import build_region_geojson
 from logic.gtfs import compute_segment_frequencies, compute_station_frequencies
 from logic.matching import (
     map_frequencies_to_infra, mergure_segments,
@@ -16,7 +16,6 @@ from logic.matching import (
 )
 from logic.rendering import make_step_colormap, render_segment_map, render_choropleth
 
-st.set_page_config(page_title="Segment Frequency", layout="wide", page_icon="🚆")
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ── Sidebar filters ──────────────────────────────────────────────────────────
@@ -29,31 +28,41 @@ with st.sidebar:
 filters = render_sidebar_filters()
 data = load_all_data(filters)
 
-# ── Processing ────────────────────────────────────────────────────────────────
+# ── Processing (cached via load_all_data + st.cache on API calls) ────────────
 
-segment_freqs = compute_segment_frequencies(
-    data["gtfs"], data["service_ids"], filters["hour_filter"], filters["day_count"],
+@st.cache_data(show_spinner="Computing segment frequencies...", ttl=3600)
+def _cached_segments(_gtfs, service_ids_tuple, hour_filter, day_count,
+                     _sdc, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo):
+    segment_freqs = compute_segment_frequencies(
+        _gtfs, set(service_ids_tuple), hour_filter, day_count,
+        service_day_counts=_sdc,
+    )
+    segments, stats = map_frequencies_to_infra(
+        segment_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo,
+    )
+    segments = [s for s in segments if s["frequency"] > 0]
+    station_freqs = compute_station_frequencies(segment_freqs)
+    segments_merged = mergure_segments(segments, buffer_km=0.5)
+    return segments, segments_merged, station_freqs, stats
+
+segments, segments_merged, station_freqs, mapping_stats = _cached_segments(
+    data["gtfs"], tuple(sorted(data["service_ids"])),
+    filters["hour_filter"], filters["day_count"],
+    data["service_day_counts"], data["stop_lookup"],
+    data["infrabel_segs"], data["gtfs_to_infra"], data["prov_geo"],
 )
-segments, mapping_stats = map_frequencies_to_infra(
-    segment_freqs, data["stop_lookup"], data["infrabel_segs"],
-    data["gtfs_to_infra"], data["prov_geo"],
-)
-segments = [s for s in segments if s["frequency"] > 0]
 
 if not segments:
     st.warning("No segments found for the selected filters.")
     st.stop()
 
-station_freqs = compute_station_frequencies(segment_freqs)
-segments_merged = mergure_segments(segments, buffer_km=0.5)
 infra_graph = build_infra_graph(data["infrabel_segs"])
 components = check_network_connectivity(infra_graph)
 
-freqs = [s["frequency"] for s in segments]
 freqs_merged = [s["frequency"] for s in segments_merged]
 max_freq_m, min_freq_m = max(freqs_merged), min(freqs_merged)
 
-# ── Header metrics ────────────────────────────────────────────────────────────
+# ── Header ───────────────────────────────────────────────────────────────────
 
 day_labels = filters["day_labels"]
 period_str = f"{filters['start_date'].strftime('%d %b %Y')} – {filters['end_date'].strftime('%d %b %Y')}"
@@ -68,10 +77,10 @@ hol_str = " | " + ", ".join(hol_parts) if hol_parts else ""
 
 st.caption(f"**{period_str}** — {days_str}{hour_str}{hol_str} — {filters['day_count']} days averaged")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Track segments", f"{len(segments_merged):,}")
 c2.metric("Busiest segment", f"{max_freq_m:.0f}/day")
-c3.metric("Services matched", f"{len(data['service_ids']):,}")
+c3.metric("Services", f"{len(data['service_ids']):,}")
 c4.metric("Days averaged", filters["day_count"])
 
 with st.expander("Diagnostics"):
@@ -154,7 +163,7 @@ elif view_mode == "Regions":
                 st.metric(reg, f"{region_stats.loc[reg, 'Sum of freq.']:,.0f}")
                 st.caption(f"{int(region_stats.loc[reg, 'Segments'])} segments")
             else:
-                st.metric(reg, "—")
+                st.metric(reg, "---")
 
     if region_vals:
         rcmap = make_step_colormap(region_vals, "Sum of segment freq.")

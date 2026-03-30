@@ -10,8 +10,14 @@ from .geo import is_in_belgium
 
 def get_active_service_ids(gtfs: dict, target_dates: list[date]) -> set[str]:
     """Determine which GTFS service_ids are active on any of the target dates."""
+    counts = get_service_day_counts(gtfs, target_dates)
+    return set(counts.keys())
+
+
+def get_service_day_counts(gtfs: dict, target_dates: list[date]) -> dict[str, int]:
+    """Count how many target dates each service_id is active on."""
     day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    active = set()
+    counts: dict[str, int] = defaultdict(int)
     ts_dates = {pd.Timestamp(d) for d in target_dates}
 
     if "calendar" in gtfs:
@@ -23,16 +29,21 @@ def get_active_service_ids(gtfs: dict, target_dates: list[date]) -> set[str]:
             mask = (cal["start_date"] <= ts) & (cal["end_date"] >= ts)
             day_col = day_names[d.weekday()]
             if day_col in cal.columns:
-                active |= set(cal.loc[mask & (cal[day_col] == "1"), "service_id"])
+                for sid in cal.loc[mask & (cal[day_col] == "1"), "service_id"]:
+                    counts[sid] += 1
 
     if "calendar_dates" in gtfs:
         cd = gtfs["calendar_dates"].copy()
         cd["date"] = pd.to_datetime(cd["date"], format="%Y%m%d")
         cd = cd[cd["date"].isin(ts_dates)]
-        active |= set(cd[cd["exception_type"] == "1"]["service_id"])
-        active -= set(cd[cd["exception_type"] == "2"]["service_id"])
+        for sid in cd[cd["exception_type"] == "1"]["service_id"]:
+            counts[sid] += 1
+        for sid in cd[cd["exception_type"] == "2"]["service_id"]:
+            counts[sid] -= 1
+        # Remove services that ended up with zero or negative counts
+        counts = {k: v for k, v in counts.items() if v > 0}
 
-    return active
+    return dict(counts)
 
 
 def build_stop_lookup(gtfs: dict) -> dict:
@@ -57,8 +68,14 @@ def build_stop_lookup(gtfs: dict) -> dict:
 
 def compute_segment_frequencies(gtfs: dict, service_ids: set[str],
                                  hour_filter: tuple | None = None,
-                                 day_count: int = 1) -> dict[tuple[str, str], float]:
-    """Compute average daily frequency per consecutive stop pair (vectorized)."""
+                                 day_count: int = 1,
+                                 service_day_counts: dict[str, int] | None = None,
+                                 ) -> dict[tuple[str, str], float]:
+    """Compute average daily frequency per consecutive stop pair (vectorized).
+
+    When service_day_counts is provided, each trip is weighted by the number of
+    target dates its service is active on, giving a correct daily average.
+    """
     trips = gtfs["trips"]
     stop_times = gtfs["stop_times"].copy()
     stops = gtfs["stops"]
@@ -72,8 +89,11 @@ def compute_segment_frequencies(gtfs: dict, service_ids: set[str],
         )
     ))
 
-    # Filter to active trips
-    active_trip_ids = set(trips.loc[trips["service_id"].isin(service_ids), "trip_id"])
+    # Filter to active trips and attach service_id
+    active_trips = trips.loc[trips["service_id"].isin(service_ids), ["trip_id", "service_id"]]
+    active_trip_ids = set(active_trips["trip_id"])
+    trip_to_service = dict(zip(active_trips["trip_id"], active_trips["service_id"]))
+
     st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()
     st_f["stop_sequence"] = pd.to_numeric(st_f["stop_sequence"], errors="coerce")
     st_f = st_f.sort_values(["trip_id", "stop_sequence"])
@@ -97,16 +117,24 @@ def compute_segment_frequencies(gtfs: dict, service_ids: set[str],
     if hour_filter:
         pairs = pairs[(pairs["hour"] >= hour_filter[0]) & (pairs["hour"] < hour_filter[1])]
 
-    # Create sorted pair keys and count
+    # Create sorted pair keys and count, weighting by active days
     s_a = pairs["station_id"].values
     s_b = pairs["next_station"].values
+    trip_ids = pairs["trip_id"].values
+
     # Sort each pair alphabetically for consistent keys
     keys_a = np.where(s_a <= s_b, s_a, s_b)
     keys_b = np.where(s_a <= s_b, s_b, s_a)
 
-    freq = defaultdict(int)
-    for a, b in zip(keys_a, keys_b):
-        freq[(a, b)] += 1
+    freq = defaultdict(float)
+    if service_day_counts:
+        for a, b, tid in zip(keys_a, keys_b, trip_ids):
+            sid = trip_to_service.get(tid)
+            weight = service_day_counts.get(sid, 1) if sid else 1
+            freq[(a, b)] += weight
+    else:
+        for a, b in zip(keys_a, keys_b):
+            freq[(a, b)] += 1
 
     return {k: v / max(day_count, 1) for k, v in freq.items() if v > 0}
 
