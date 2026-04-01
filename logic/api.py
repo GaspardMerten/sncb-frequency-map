@@ -1,16 +1,16 @@
 """API calls to the MobilityTwin Brussels platform."""
 
-import io
-import zipfile
+import os
+import tempfile
 import requests
-import pandas as pd
 import streamlit as st
+import gtfs_kit as gk
 
 API_BASE = "https://api.mobilitytwin.brussels"
 
 
-@st.cache_data(ttl=3600, show_spinner="Fetching SNCB schedule...")
-def fetch_gtfs(timestamp: int, token: str) -> dict[str, pd.DataFrame]:
+@st.cache_resource(ttl=3600)
+def fetch_gtfs(timestamp: int, token: str) -> gk.Feed:
     """Download and parse the SNCB GTFS zip for a given timestamp."""
     r = requests.get(
         f"{API_BASE}/sncb/gtfs",
@@ -19,15 +19,14 @@ def fetch_gtfs(timestamp: int, token: str) -> dict[str, pd.DataFrame]:
         timeout=120,
     )
     r.raise_for_status()
-    frames = {}
-    needed = {"stops", "stop_times", "trips", "calendar", "calendar_dates"}
-    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        for name in zf.namelist():
-            key = name.replace(".txt", "").split("/")[-1]
-            if key in needed:
-                with zf.open(name) as f:
-                    frames[key] = pd.read_csv(f, dtype=str)
-    return frames
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        tmp.write(r.content)
+        tmp.close()
+        feed = gk.read_feed(tmp.name, dist_units="km")
+    finally:
+        os.unlink(tmp.name)
+    return feed
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching rail segments...")

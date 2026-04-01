@@ -12,6 +12,8 @@ st.set_page_config(
 home = st.Page("pages/home.py", title="Home", icon="🏠", default=True)
 segments = st.Page("pages/1_Segment_Frequency.py", title="Segment Frequency", icon="🚆")
 reach = st.Page("pages/2_Station_Reach.py", title="Station Reach", icon="📍")
+connectivity = st.Page("pages/3_Station_Connectivity.py", title="Station Connectivity", icon="📊")
+duration = st.Page("pages/4_Travel_Duration.py", title="Travel Duration", icon="⏱️")
 
-pg = st.navigation([home, segments, reach])
+pg = st.navigation([home, segments, reach, connectivity, duration])
 pg.run()

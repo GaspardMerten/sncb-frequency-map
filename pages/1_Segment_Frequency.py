@@ -9,7 +9,7 @@ from streamlit_folium import st_folium
 
 from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
 from logic.geo import build_region_geojson
-from logic.gtfs import compute_segment_frequencies, compute_station_frequencies
+from logic.gtfs import compute_station_frequencies
 from logic.matching import (
     map_frequencies_to_infra, mergure_segments,
     check_network_connectivity, build_infra_graph,
@@ -28,35 +28,34 @@ with st.sidebar:
 filters = render_sidebar_filters()
 data = load_all_data(filters)
 
-# ── Processing (cached via load_all_data + st.cache on API calls) ────────────
+# ── Processing ────────────────────────────────────────────────────────────────
 
-@st.cache_data(show_spinner="Computing segment frequencies...", ttl=3600)
-def _cached_segments(_gtfs, service_ids_tuple, hour_filter, day_count,
-                     _sdc, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo):
-    segment_freqs = compute_segment_frequencies(
-        _gtfs, set(service_ids_tuple), hour_filter, day_count,
-        service_day_counts=_sdc,
-    )
+segment_freqs = data["segment_freqs"]
+cluster_map = data.get("cluster_map")
+
+@st.cache_data(show_spinner="Mapping to infrastructure...", ttl=3600)
+def _cached_segments(_seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra,
+                     _prov_geo, _cluster_map):
     segments, stats = map_frequencies_to_infra(
-        segment_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo,
+        _seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo,
+        cluster_map=_cluster_map,
     )
     segments = [s for s in segments if s["frequency"] > 0]
-    station_freqs = compute_station_frequencies(segment_freqs)
+    station_freqs = compute_station_frequencies(_seg_freqs)
     segments_merged = mergure_segments(segments, buffer_km=0.5)
     return segments, segments_merged, station_freqs, stats
 
 segments, segments_merged, station_freqs, mapping_stats = _cached_segments(
-    data["gtfs"], tuple(sorted(data["service_ids"])),
-    filters["hour_filter"], filters["day_count"],
-    data["service_day_counts"], data["stop_lookup"],
+    segment_freqs, data["stop_lookup"],
     data["infrabel_segs"], data["gtfs_to_infra"], data["prov_geo"],
+    cluster_map,
 )
 
 if not segments:
     st.warning("No segments found for the selected filters.")
     st.stop()
 
-infra_graph = build_infra_graph(data["infrabel_segs"])
+infra_graph = build_infra_graph(data["infrabel_segs"], cluster_map)
 components = check_network_connectivity(infra_graph)
 
 freqs_merged = [s["frequency"] for s in segments_merged]
@@ -91,6 +90,7 @@ with st.expander("Diagnostics"):
 - GTFS stop-pairs: {mapping_stats['total']:,}
 - Mapped to Infrabel: {mapping_stats['mapped']:,} ({100*mapping_stats['mapped']/max(mapping_stats['total'],1):.0f}%)
   - Direct: {mapping_stats['direct']:,} | Via path: {mapping_stats['path']:,}
+- Fallback (GTFS coords): {mapping_stats.get('fallback', 0):,}
 - Dropped: {mapping_stats['dropped']:,}
         """)
     with d2:

@@ -18,20 +18,22 @@ from .geo import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Station matching with spatial index
+# Infrabel station clustering: remap isolated points to connected neighbours
 # ---------------------------------------------------------------------------
 
-def build_gtfs_to_infra_mapping(stop_lookup: dict, op_points: dict,
-                                 buffer_km: float = 1.0) -> dict[str, str]:
-    """Match GTFS stations to nearest Infrabel operational point within buffer_km.
+def build_infra_cluster_map(op_points: dict, infrabel_segs: dict,
+                             radius_km: float = 1.0) -> dict[str, str]:
+    """Build a mapping: Infrabel ptcarid -> canonical ptcarid.
 
-    Uses Shapely STRtree for O(n log n) nearest-neighbour queries instead of brute force.
+    Only remaps stations that have NO segments (isolated operational points)
+    to the nearest station that DOES have segments, within radius_km.
+    Connected stations keep their own ID.
     """
     if not op_points or "features" not in op_points:
         return {}
 
-    # Extract Infrabel points
-    infra_ids, infra_geoms = [], []
+    # Extract all operational points
+    infra_points = {}  # ptcarid -> (lat, lon)
     for feat in op_points["features"]:
         props = feat.get("properties", {})
         ptcarid = str(props.get("ptcarid", "")).strip()
@@ -39,21 +41,100 @@ def build_gtfs_to_infra_mapping(stop_lookup: dict, op_points: dict,
             continue
         lat, lon = _extract_point_coords(feat)
         if lat is not None and lon is not None:
-            infra_ids.append(ptcarid)
-            infra_geoms.append(Point(float(lon), float(lat)))
+            infra_points[ptcarid] = (float(lat), float(lon))
+
+    # Find which stations appear in segments (connected)
+    connected = set()
+    if infrabel_segs and "features" in infrabel_segs:
+        for feat in infrabel_segs["features"]:
+            props = feat.get("properties", {})
+            fid = str(props.get("stationfrom_id", "")).strip()
+            tid = str(props.get("stationto_id", "")).strip()
+            if fid:
+                connected.add(fid)
+            if tid:
+                connected.add(tid)
+
+    # Build spatial index of CONNECTED stations only
+    connected_ids = [pid for pid in infra_points if pid in connected]
+    connected_geoms = [Point(infra_points[pid][1], infra_points[pid][0])
+                       for pid in connected_ids]
+
+    if not connected_geoms:
+        return {pid: pid for pid in infra_points}
+
+    tree = STRtree(connected_geoms)
+
+    # For each isolated station, find nearest connected station within radius
+    mapping = {}
+    n_remapped = 0
+    for pid, (lat, lon) in infra_points.items():
+        if pid in connected:
+            mapping[pid] = pid
+            continue
+
+        query_pt = Point(lon, lat)
+        idx = tree.nearest(query_pt)
+        nearest_pt = connected_geoms[idx]
+        dist = haversine_km(lat, lon, nearest_pt.y, nearest_pt.x)
+        if dist <= radius_km:
+            mapping[pid] = connected_ids[idx]
+            n_remapped += 1
+        else:
+            mapping[pid] = pid
+
+    if n_remapped > 0:
+        logger.info(f"Infra clustering: {n_remapped} isolated points remapped to "
+                     f"nearest connected station (radius={radius_km}km)")
+
+    return mapping
+
+
+# ---------------------------------------------------------------------------
+# Station matching with spatial index
+# ---------------------------------------------------------------------------
+
+def build_gtfs_to_infra_mapping(stop_lookup: dict, op_points: dict,
+                                 buffer_km: float = 1.0,
+                                 infrabel_segs: dict | None = None) -> dict[str, str]:
+    """Match GTFS stations to nearest Infrabel operational point within buffer_km.
+
+    If infrabel_segs is provided, clusters isolated Infrabel stations first so that
+    they get remapped to nearby connected neighbours.
+    """
+    if not op_points or "features" not in op_points:
+        return {}
+
+    # Build cluster map if we have segment data
+    cluster_map = None
+    if infrabel_segs:
+        cluster_map = build_infra_cluster_map(op_points, infrabel_segs, radius_km=buffer_km)
+
+    # Extract Infrabel points (using canonical IDs after clustering)
+    infra_ids, infra_geoms = [], []
+    seen_canonical = {}
+    for feat in op_points["features"]:
+        props = feat.get("properties", {})
+        ptcarid = str(props.get("ptcarid", "")).strip()
+        if not ptcarid:
+            continue
+        canonical = cluster_map.get(ptcarid, ptcarid) if cluster_map else ptcarid
+        lat, lon = _extract_point_coords(feat)
+        if lat is not None and lon is not None:
+            if canonical not in seen_canonical:
+                seen_canonical[canonical] = len(infra_ids)
+                infra_ids.append(canonical)
+                infra_geoms.append(Point(float(lon), float(lat)))
 
     if not infra_geoms:
         return {}
 
-    # Build spatial index
     tree = STRtree(infra_geoms)
-    buf_deg = km_to_deg_buffer(buffer_km)
 
     mapping = {}
     match_distances = []
     for station_id, info in stop_lookup.items():
         query_pt = Point(info["lon"], info["lat"])
-        # Query nearest point
         idx = tree.nearest(query_pt)
         nearest_pt = infra_geoms[idx]
         dist_km = haversine_km(info["lat"], info["lon"],
@@ -92,7 +173,9 @@ def _extract_point_coords(feat: dict) -> tuple:
 # Infrabel infrastructure graph
 # ---------------------------------------------------------------------------
 
-def build_infra_segment_index(infrabel_segs: dict) -> dict[tuple[str, str], list]:
+def build_infra_segment_index(infrabel_segs: dict,
+                               cluster_map: dict[str, str] | None = None,
+                               ) -> dict[tuple[str, str], list]:
     """Index: sorted(station_from, station_to) -> GeoJSON coordinates."""
     index = {}
     if not infrabel_segs or "features" not in infrabel_segs:
@@ -104,15 +187,20 @@ def build_infra_segment_index(infrabel_segs: dict) -> dict[tuple[str, str], list
             continue
         fid = str(props.get("stationfrom_id", "")).strip()
         tid = str(props.get("stationto_id", "")).strip()
-        if fid and tid:
+        if cluster_map:
+            fid = cluster_map.get(fid, fid)
+            tid = cluster_map.get(tid, tid)
+        if fid and tid and fid != tid:
             key = tuple(sorted([fid, tid]))
             if key not in index or len(coords) > len(index[key]):
                 index[key] = coords
     return index
 
 
-def build_infra_graph(infrabel_segs: dict) -> dict[str, set[str]]:
-    """Adjacency graph of Infrabel station IDs."""
+def build_infra_graph(infrabel_segs: dict,
+                       cluster_map: dict[str, str] | None = None,
+                       ) -> dict[str, set[str]]:
+    """Adjacency graph of Infrabel station IDs, with optional clustering."""
     graph: dict[str, set[str]] = defaultdict(set)
     if not infrabel_segs or "features" not in infrabel_segs:
         return graph
@@ -120,7 +208,10 @@ def build_infra_graph(infrabel_segs: dict) -> dict[str, set[str]]:
         props = feat.get("properties", {})
         fid = str(props.get("stationfrom_id", "")).strip()
         tid = str(props.get("stationto_id", "")).strip()
-        if fid and tid:
+        if cluster_map:
+            fid = cluster_map.get(fid, fid)
+            tid = cluster_map.get(tid, tid)
+        if fid and tid and fid != tid:
             graph[fid].add(tid)
             graph[tid].add(fid)
     return dict(graph)
@@ -168,7 +259,9 @@ def check_network_connectivity(graph: dict) -> list[set[str]]:
     return components
 
 
-def build_infra_names(infrabel_segs: dict) -> dict[str, str]:
+def build_infra_names(infrabel_segs: dict,
+                       cluster_map: dict[str, str] | None = None,
+                       ) -> dict[str, str]:
     """Map Infrabel station IDs to human-readable names."""
     names = {}
     if not infrabel_segs or "features" not in infrabel_segs:
@@ -178,6 +271,8 @@ def build_infra_names(infrabel_segs: dict) -> dict[str, str]:
         for id_key, name_key in [("stationfrom_id", "stationfrom_name"),
                                   ("stationto_id", "stationto_name")]:
             sid = str(props.get(id_key, "")).strip()
+            if cluster_map:
+                sid = cluster_map.get(sid, sid)
             if sid:
                 names.setdefault(sid, props.get(name_key, sid))
     return names
@@ -188,15 +283,18 @@ def build_infra_names(infrabel_segs: dict) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
-                              gtfs_to_infra, prov_geo):
+                              gtfs_to_infra, prov_geo,
+                              cluster_map: dict[str, str] | None = None):
     """Resolve GTFS stop-pair frequencies onto Infrabel track segments via BFS."""
-    infra_index = build_infra_segment_index(infrabel_segs)
-    infra_graph = build_infra_graph(infrabel_segs)
-    infra_names = build_infra_names(infrabel_segs)
+    infra_index = build_infra_segment_index(infrabel_segs, cluster_map)
+    infra_graph = build_infra_graph(infrabel_segs, cluster_map)
+    infra_names = build_infra_names(infrabel_segs, cluster_map)
     gtfs_to_infra = gtfs_to_infra or {}
 
     infra_freq: dict[tuple[str, str], float] = defaultdict(float)
-    stats = {"total": 0, "mapped": 0, "direct": 0, "path": 0, "dropped": 0}
+    # Track unmapped GTFS pairs for fallback synthetic segments
+    fallback_pairs: dict[tuple[str, str], float] = defaultdict(float)
+    stats = {"total": 0, "mapped": 0, "direct": 0, "path": 0, "dropped": 0, "fallback": 0}
 
     for (stop_a, stop_b), freq in segment_freqs.items():
         if stop_a not in stop_lookup or stop_b not in stop_lookup or freq <= 0:
@@ -206,6 +304,7 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
         infra_a = gtfs_to_infra.get(stop_a)
         infra_b = gtfs_to_infra.get(stop_b)
         if not infra_a or not infra_b or infra_a == infra_b:
+            fallback_pairs[(stop_a, stop_b)] += freq
             stats["dropped"] += 1
             continue
 
@@ -227,8 +326,10 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
                     stats["path"] += 1
                     stats["mapped"] += 1
                 else:
+                    fallback_pairs[(stop_a, stop_b)] += freq
                     stats["dropped"] += 1
             else:
+                fallback_pairs[(stop_a, stop_b)] += freq
                 stats["dropped"] += 1
 
     results = []
@@ -254,6 +355,27 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
             "region": PROVINCE_TO_REGION.get(province, "Unknown"),
         })
 
+    # Fallback: create synthetic segments for unmapped GTFS pairs
+    for (stop_a, stop_b), freq in fallback_pairs.items():
+        if freq <= 0:
+            continue
+        info_a = stop_lookup[stop_a]
+        info_b = stop_lookup[stop_b]
+        latlon = [[info_a["lat"], info_a["lon"]], [info_b["lat"], info_b["lon"]]]
+        mid_lat = (info_a["lat"] + info_b["lat"]) / 2
+        mid_lon = (info_a["lon"] + info_b["lon"]) / 2
+        province = get_province(mid_lat, mid_lon, prov_geo)
+        if not province:
+            continue
+        results.append({
+            "id_a": stop_a, "id_b": stop_b,
+            "stop_a": info_a["name"], "stop_b": info_b["name"],
+            "frequency": freq, "coords": latlon,
+            "province": province,
+            "region": PROVINCE_TO_REGION.get(province, "Unknown"),
+        })
+        stats["fallback"] += 1
+
     return results, stats
 
 
@@ -263,18 +385,12 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
 
 def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
                      size_tolerance: float = 0.5, max_iterations: int = 20) -> list[dict]:
-    """Resolve overlapping segments by merging or cutting (Shapely-accelerated).
-
-    Rules applied iteratively until stable:
-      - Similar length + overlap >= 70% -> MERGE (sum frequencies, keep longer geometry)
-      - One contained in other (>= 80%) + different sizes -> CUT larger into 3 parts
-    """
+    """Resolve overlapping segments by merging or cutting (Shapely-accelerated)."""
     from .geo import latlon_to_linestring
     working = [dict(s) for s in segments]
 
     for iteration in range(max_iterations):
         changed = False
-        # Build spatial index of all segment bounding boxes for fast candidate filtering
         from shapely import STRtree as ST
         geoms = []
         for seg in working:
@@ -289,7 +405,6 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
             if i in merged_indices:
                 continue
 
-            # Query spatial index for nearby segments
             candidates = tree.query(geoms[i])
             for j in candidates:
                 if j <= i or j in merged_indices:
@@ -310,7 +425,6 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
                 size_ratio = min(len_i, len_j) / max(len_i, len_j)
                 similar_size = size_ratio >= size_tolerance
 
-                # Case 1: Similar size + mutual overlap -> MERGE
                 if similar_size and overlap_ij >= 0.7 and overlap_ji >= 0.7:
                     merged_indices.add(i)
                     merged_indices.add(j)
@@ -318,7 +432,6 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
                     changed = True
                     break
 
-                # Case 2: One contained in the other -> CUT
                 if overlap_ij >= 0.8 and not similar_size:
                     large, small = (seg_j, seg_i) if len_j > len_i else (seg_i, seg_j)
                     parts = _cut_larger(large, small, buffer_km)
@@ -347,7 +460,6 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
 
 
 def _merge_two(seg_a: dict, seg_b: dict) -> dict:
-    """Merge two similar overlapping segments: sum frequencies, keep longer geometry."""
     len_a = polyline_length_km(seg_a["coords"])
     len_b = polyline_length_km(seg_b["coords"])
     base = seg_a if len_a >= len_b else seg_b
@@ -362,10 +474,6 @@ def _merge_two(seg_a: dict, seg_b: dict) -> dict:
 
 
 def _cut_larger(seg_large: dict, seg_small: dict, buffer_km: float) -> list[dict] | None:
-    """Cut the larger segment at overlap boundaries with the smaller one.
-
-    Returns up to 3 segments: [before, overlap (combined freq), after].
-    """
     overlap_range = find_overlap_range(seg_large["coords"], seg_small["coords"], buffer_km)
     if overlap_range is None:
         return None
@@ -407,7 +515,6 @@ def _cut_larger(seg_large: dict, seg_small: dict, buffer_km: float) -> list[dict
 
 
 def count_remaining_overlaps(segments: list[dict], buffer_km: float = 0.5) -> int:
-    """Count segment pairs that still overlap significantly after mergure."""
     from .geo import latlon_to_linestring
     geoms = []
     for seg in segments:

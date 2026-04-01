@@ -7,3 +7,5 @@ streamlit-folium
 branca
 python-dotenv
 shapely
+gtfs-kit
+plotly

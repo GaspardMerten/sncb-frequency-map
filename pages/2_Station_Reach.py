@@ -11,8 +11,9 @@ from streamlit_folium import st_folium
 
 from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
 from logic.geo import build_region_geojson, PROVINCE_TO_REGION
-from logic.reachability import (
-    build_timetable_graph, compute_reachability_single, compute_all_reachability,
+from logic.reachability import compute_reachability_single, compute_all_reachability
+from logic.matching import (
+    build_infra_segment_index, build_infra_graph, find_path,
 )
 from logic.rendering import make_step_colormap, render_reach_choropleth
 
@@ -28,54 +29,37 @@ with st.sidebar:
     st.markdown('<p class="sidebar-section">Reach settings</p>', unsafe_allow_html=True)
     max_hours = st.number_input("Time budget (hours)", min_value=0.5, max_value=6.0,
                                 value=1.5, step=0.5, format="%.1f")
-    departure_hour = st.slider("Departure hour", 0, 23, 8)
+    departure_window = st.slider("Departure window", 0, 24, (7, 9), step=1)
     transfer_penalty = st.slider("Min transfer time (min)", 0, 15, 5)
+    max_transfers = st.slider("Max transfers", 0, 5, 3)
 
 filters = render_sidebar_filters()
 data = load_all_data(filters)
 
+station_departures = data["station_departures"]
+cluster_map = data.get("cluster_map")
+
 # ── Cached heavy computations ────────────────────────────────────────────────
-
-@st.cache_data(show_spinner="Building timetable graph...", ttl=3600)
-def _cached_timetable(gtfs_stops, gtfs_stop_times, gtfs_trips, gtfs_calendar,
-                      gtfs_calendar_dates, service_ids_tuple, hour_filter):
-    """Cache timetable graph build (keyed on immutable inputs)."""
-    gtfs = {
-        "stops": gtfs_stops, "stop_times": gtfs_stop_times,
-        "trips": gtfs_trips, "calendar": gtfs_calendar,
-        "calendar_dates": gtfs_calendar_dates,
-    }
-    return build_timetable_graph(gtfs, set(service_ids_tuple), hour_filter)
-
 
 @st.cache_data(show_spinner="Computing station reachability...", ttl=3600)
 def _cached_reachability(station_ids_tuple, _station_departures, max_hours,
-                          _stop_lookup, _prov_geo, transfer_penalty, departure_hour):
-    """Cache full reachability computation."""
+                          _stop_lookup, _prov_geo, transfer_penalty, departure_window,
+                          max_transfers):
     return compute_all_reachability(
         list(station_ids_tuple), _station_departures, max_hours,
         _stop_lookup, _prov_geo,
         transfer_penalty_min=transfer_penalty,
-        departure_hour=departure_hour,
+        departure_window=departure_window,
+        max_transfers=max_transfers,
     )
 
 
-# Build timetable (cached)
-gtfs = data["gtfs"]
-station_departures = _cached_timetable(
-    gtfs.get("stops"), gtfs.get("stop_times"), gtfs.get("trips"),
-    gtfs.get("calendar"), gtfs.get("calendar_dates"),
-    tuple(sorted(data["service_ids"])),
-    filters["hour_filter"],
-)
-
 station_ids = list(data["stop_lookup"].keys())
 
-# Compute reachability for all stations (cached)
 reach_df = _cached_reachability(
     tuple(sorted(station_ids)), station_departures, max_hours,
     data["stop_lookup"], data["prov_geo"],
-    transfer_penalty, departure_hour,
+    transfer_penalty, departure_window, max_transfers,
 )
 
 if reach_df.empty:
@@ -86,7 +70,7 @@ if reach_df.empty:
 
 st.caption(
     f"**{filters['start_date'].strftime('%d %b %Y')} – {filters['end_date'].strftime('%d %b %Y')}** "
-    f"— {filters['day_count']} days — Departure {departure_hour}:00 — Budget {max_hours}h"
+    f"— {filters['day_count']} days — Departures {departure_window[0]}h–{departure_window[1]}h — Budget {max_hours}h"
 )
 
 c1, c2, c3, c4 = st.columns(4)
@@ -103,12 +87,67 @@ reach_spread = max(max_reach - min_reach, 1)
 
 
 def _reach_color(count):
-    """Map reachable count to a vivid blue gradient."""
     ratio = (count - min_reach) / reach_spread
     r = int(107 + (4 - 107) * ratio)
     g = int(174 + (47 - 174) * ratio)
     b = int(214 + (107 - 214) * ratio)
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _time_color(travel_min, max_min):
+    """Green (fast) -> yellow -> red (slow)."""
+    ratio = min(travel_min / max(max_min, 1), 1.0)
+    if ratio < 0.5:
+        r = int(34 + (255 - 34) * (ratio * 2))
+        g = int(139 + (200 - 139) * (ratio * 2))
+        b = 34
+    else:
+        r2 = (ratio - 0.5) * 2
+        r = int(255 - (255 - 220) * r2)
+        g = int(200 - 180 * r2)
+        b = int(34 - 30 * r2)
+    return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+
+
+def _draw_infra_path(m, path, stop_lookup, gtfs_to_infra, infra_index, infra_graph,
+                      color, weight, opacity, tooltip):
+    """Draw a reachability path using Infrabel segment geometry when available."""
+    from logic.geo import coords_to_latlon
+    drawn = False
+    for i in range(len(path) - 1):
+        a_infra = gtfs_to_infra.get(path[i])
+        b_infra = gtfs_to_infra.get(path[i + 1])
+        if a_infra and b_infra and a_infra != b_infra:
+            # Try direct segment
+            seg_key = tuple(sorted([a_infra, b_infra]))
+            if seg_key in infra_index:
+                coords = coords_to_latlon(infra_index[seg_key])
+                folium.PolyLine(coords, color=color, weight=weight,
+                                opacity=opacity, tooltip=tooltip).add_to(m)
+                drawn = True
+                continue
+            # Try BFS path through infra
+            infra_path = find_path(infra_graph, a_infra, b_infra, max_depth=10)
+            if infra_path:
+                for j in range(len(infra_path) - 1):
+                    sk = tuple(sorted([infra_path[j], infra_path[j + 1]]))
+                    if sk in infra_index:
+                        coords = coords_to_latlon(infra_index[sk])
+                        folium.PolyLine(coords, color=color, weight=weight,
+                                        opacity=opacity, tooltip=tooltip).add_to(m)
+                        drawn = True
+                continue
+        # Fallback: straight line for this hop
+        a_info = stop_lookup.get(path[i])
+        b_info = stop_lookup.get(path[i + 1])
+        if a_info and b_info:
+            folium.PolyLine(
+                [[a_info["lat"], a_info["lon"]], [b_info["lat"], b_info["lon"]]],
+                color=color, weight=weight, opacity=opacity,
+                tooltip=tooltip, dash_array="6",
+            ).add_to(m)
+            drawn = True
+    return drawn
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -134,7 +173,6 @@ if view_mode == "Stations":
             ),
         ).add_to(m)
 
-    # Station selector for highlighting connections
     selected = st.selectbox(
         "Highlight station connections",
         options=["(none)"] + list(
@@ -149,9 +187,14 @@ if view_mode == "Stations":
 
         reachable = compute_reachability_single(
             sel_id, station_departures, max_hours * 60,
+            max_transfers=max_transfers,
             transfer_penalty_min=transfer_penalty,
-            departure_hour=departure_hour,
+            departure_window=departure_window,
         )
+
+        # Build infra index for path rendering
+        infra_index = build_infra_segment_index(data["infrabel_segs"], cluster_map)
+        infra_graph = build_infra_graph(data["infrabel_segs"], cluster_map)
 
         # Origin marker
         folium.CircleMarker(
@@ -161,24 +204,22 @@ if view_mode == "Stations":
             tooltip=f"<b>{sel_row['station_name']}</b> (ORIGIN)",
         ).add_to(m)
 
-        # Lines to reachable stations
+        max_min = max_hours * 60
         for r_id, r_info in reachable.items():
             r_lookup = data["stop_lookup"].get(r_id)
             if not r_lookup:
                 continue
             travel_min = r_info["travel_time"]
-            time_ratio = min(travel_min / (max_hours * 60), 1.0)
-            # Green (fast) to red (slow)
-            lr = int(34 + (220 - 34) * time_ratio)
-            lg = int(139 - 100 * time_ratio)
-            lb = int(34 - 30 * time_ratio)
-            lc = f"#{max(0,lr):02x}{max(0,lg):02x}{max(0,lb):02x}"
+            lc = _time_color(travel_min, max_min)
+            path = r_info.get("path", [])
 
-            folium.PolyLine(
-                locations=[[sel_row["lat"], sel_row["lon"]], [r_lookup["lat"], r_lookup["lon"]]],
-                color=lc, weight=2, opacity=0.65,
-                tooltip=f"{r_lookup['name']}: {travel_min:.0f} min, {r_info['transfers']} transfer(s)",
-            ).add_to(m)
+            tooltip_text = f"{r_lookup['name']}: {travel_min:.0f} min, {r_info['transfers']} transfer(s)"
+
+            if len(path) >= 2:
+                _draw_infra_path(m, path, data["stop_lookup"], data["gtfs_to_infra"],
+                                  infra_index, infra_graph,
+                                  color=lc, weight=3, opacity=0.75,
+                                  tooltip=tooltip_text)
 
             folium.CircleMarker(
                 location=[r_lookup["lat"], r_lookup["lon"]],
@@ -191,7 +232,6 @@ if view_mode == "Stations":
 
     st_folium(m, use_container_width=True, height=700, key="reach_map")
 
-    # Data table
     st.subheader("Station Reachability Table")
     display_df = reach_df[["station_name", "reachable_count", "avg_travel_time", "province", "region"]].copy()
     display_df.columns = ["Station", "Reachable Stations", "Avg Travel (min)", "Province", "Region"]
