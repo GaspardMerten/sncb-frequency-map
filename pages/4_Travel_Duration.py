@@ -12,7 +12,7 @@ from streamlit_folium import st_folium
 
 from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
 from logic.geo import build_region_geojson, get_province, PROVINCE_TO_REGION
-from logic.reachability import compute_reachability_single
+from logic.reachability import compute_reachability_single, compute_reachability_to_dest
 from logic.rendering import make_step_colormap, render_reach_choropleth
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -25,6 +25,10 @@ with st.sidebar:
                          label_visibility="collapsed", horizontal=True)
     st.markdown('<hr class="sidebar-divider"/>', unsafe_allow_html=True)
     st.markdown('<p class="sidebar-section">Duration settings</p>', unsafe_allow_html=True)
+    direction = st.radio("Direction", ["To destination", "From destination"],
+                         horizontal=True,
+                         help="**To destination**: how long from each station to reach the selected station. "
+                              "**From destination**: how far you can go from the selected station.")
     max_hours = st.number_input("Time budget (hours)", min_value=0.5, max_value=6.0,
                                 value=3.0, step=0.5, format="%.1f")
     departure_window = st.slider("Departure window", 0, 24, (7, 9), step=1)
@@ -35,6 +39,7 @@ filters = render_sidebar_filters()
 data = load_all_data(filters)
 
 station_departures = data["station_departures"]
+reverse_departures = data["reverse_departures"]
 stop_lookup = data["stop_lookup"]
 
 # ── Destination selector (multi) ─────────────────────────────────────────────
@@ -63,8 +68,8 @@ destination_ids = [name_to_id[n] for n in destination_names]
 # ── Compute travel times ─────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner="Computing travel durations...", ttl=3600)
-def _cached_durations(dest_id, _departures, max_hours, departure_window,
-                      transfer_penalty, max_transfers):
+def _cached_durations_from(dest_id, _departures, max_hours, departure_window,
+                           transfer_penalty, max_transfers):
     return compute_reachability_single(
         dest_id, _departures, max_hours * 60,
         max_transfers=max_transfers,
@@ -73,13 +78,30 @@ def _cached_durations(dest_id, _departures, max_hours, departure_window,
     )
 
 
+@st.cache_data(show_spinner="Computing travel durations...", ttl=3600)
+def _cached_durations_to(dest_id, _reverse_departures, max_hours, arrival_window,
+                         transfer_penalty, max_transfers):
+    return compute_reachability_to_dest(
+        dest_id, _reverse_departures, max_hours * 60,
+        max_transfers=max_transfers,
+        transfer_penalty_min=transfer_penalty,
+        arrival_window=arrival_window,
+    )
+
+
 # Compute for each destination
 all_reachable = {}
 for dest_id in destination_ids:
-    all_reachable[dest_id] = _cached_durations(
-        dest_id, station_departures, max_hours,
-        departure_window, transfer_penalty, max_transfers,
-    )
+    if direction == "To destination":
+        all_reachable[dest_id] = _cached_durations_to(
+            dest_id, reverse_departures, max_hours,
+            departure_window, transfer_penalty, max_transfers,
+        )
+    else:
+        all_reachable[dest_id] = _cached_durations_from(
+            dest_id, station_departures, max_hours,
+            departure_window, transfer_penalty, max_transfers,
+        )
 
 
 def _build_duration_df(reachable, dest_id):
@@ -252,10 +274,12 @@ def _render_region_view(df, dest_label):
 # ── Header ───────────────────────────────────────────────────────────────────
 
 dest_str = ", ".join(destination_names)
+dir_label = "to" if direction == "To destination" else "from"
+window_label = "Arrivals" if direction == "To destination" else "Departures"
 st.caption(
     f"**{filters['start_date'].strftime('%d %b %Y')} – {filters['end_date'].strftime('%d %b %Y')}** "
-    f"— To **{dest_str}** — Budget {max_hours}h — "
-    f"Departures {departure_window[0]}h–{departure_window[1]}h"
+    f"— Travel {dir_label} **{dest_str}** — Budget {max_hours}h — "
+    f"{window_label} {departure_window[0]}h–{departure_window[1]}h"
 )
 
 # Compute global max time for consistent coloring

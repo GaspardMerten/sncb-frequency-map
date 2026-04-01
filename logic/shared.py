@@ -12,7 +12,7 @@ from .holidays import (
     public_holidays_in_range, school_holidays_in_range, SCHOOL_HOLIDAYS,
 )
 from .gtfs import get_service_day_counts, build_stop_lookup, compute_segment_frequencies
-from .reachability import build_timetable_graph
+from .reachability import build_timetable_graph, build_reverse_timetable_graph
 from .matching import build_gtfs_to_infra_mapping, build_infra_cluster_map
 
 load_dotenv()
@@ -205,8 +205,25 @@ def _month_ranges(start_date: date, end_date: date) -> list[tuple[int, date, dat
 
 
 def load_all_data(filters: dict):
-    """Fetch and process all shared data with progress indication."""
-    return _load_all_data_inner(filters)
+    """Fetch and process all shared data with progress indication.
+
+    Uses session_state to cache results per unique filter combination,
+    avoiding redundant recomputation on page reruns.
+    """
+    # Build a hashable cache key from the filters that affect data
+    cache_key = (
+        filters["token"],
+        tuple(filters["all_dates"]),
+        filters["day_count"],
+        filters.get("hour_filter") and tuple(filters["hour_filter"]),
+    )
+    if "_data_cache_key" in st.session_state and st.session_state["_data_cache_key"] == cache_key:
+        return st.session_state["_data_cache"]
+
+    result = _load_all_data_inner(filters)
+    st.session_state["_data_cache_key"] = cache_key
+    st.session_state["_data_cache"] = result
+    return result
 
 
 def _load_all_data_inner(filters: dict):
@@ -290,6 +307,9 @@ def _load_all_data_inner(filters: dict):
     for sid in accumulated_departures:
         accumulated_departures[sid].sort(key=lambda x: x[0])
 
+    station_departures = dict(accumulated_departures)
+    reverse_departures = build_reverse_timetable_graph(station_departures)
+
     segment_freqs = {k: v / max(day_count, 1) for k, v in accumulated_seg_freqs.items()}
 
     try:
@@ -312,7 +332,8 @@ def _load_all_data_inner(filters: dict):
 
     return {
         "segment_freqs": dict(segment_freqs),
-        "station_departures": dict(accumulated_departures),
+        "station_departures": station_departures,
+        "reverse_departures": reverse_departures,
         "infrabel_segs": infrabel_segs,
         "op_points": op_points,
         "prov_geo": prov_geo,
