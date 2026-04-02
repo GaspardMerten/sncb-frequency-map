@@ -14,7 +14,7 @@ from logic.reachability import compute_reachability_single, compute_all_reachabi
 from logic.matching import (
     build_infra_segment_index, build_infra_graph, find_path,
 )
-from logic.rendering import make_step_colormap, render_reach_choropleth, ratio_to_blue, duration_color
+from logic.rendering import make_step_colormap, render_reach_choropleth, ratio_to_blue, duration_color, render_voronoi_map
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -22,7 +22,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown('<p class="sidebar-section">View</p>', unsafe_allow_html=True)
-    view_mode = st.radio("Display", ["Stations", "Provinces", "Regions"],
+    view_mode = st.radio("Display", ["Stations", "Provinces", "Regions", "Voronoi"],
                          label_visibility="collapsed", horizontal=True)
     st.markdown('<hr class="sidebar-divider"/>', unsafe_allow_html=True)
     st.markdown('<p class="sidebar-section">Reach settings</p>', unsafe_allow_html=True)
@@ -71,6 +71,29 @@ st.caption(
     f"**{filters['start_date'].strftime('%d %b %Y')} – {filters['end_date'].strftime('%d %b %Y')}** "
     f"— {filters['day_count']} days — Departures {departure_window[0]}h–{departure_window[1]}h — Budget {max_hours}h"
 )
+
+with st.expander("ℹ️ How is this computed?"):
+    st.markdown("""
+**What it measures**
+
+For each station: *how many other stations can you reach within a given time budget, allowing transfers?*
+
+**Algorithm — Breadth-First Search (BFS) on the timetable**
+1. A timetable graph is built from GTFS data: for every station, the list of departures (destination, departure time, arrival time, trip ID) during the selected time window.
+2. Starting from a station at every minute in the **departure window** (e.g. 7:00–9:00), the algorithm explores all reachable destinations by following actual train connections.
+3. **Transfers** are allowed: when arriving at an intermediate station, you can board a different train after a minimum transfer time (configurable, default 5 min).
+4. The search stops when the travel time exceeds the **time budget** or the **maximum number of transfers** is reached.
+5. The best result (shortest time, fewest transfers) across all departure minutes is kept.
+
+**Metrics per station**
+- **Reachable count**: number of distinct stations reachable within the budget.
+- **Avg travel time**: average travel time (in minutes) to all reachable stations.
+
+**Views**
+- *Stations*: circle size and color reflect reachable count. Select one station to see its connections drawn along real track geometry.
+- *Provinces / Regions*: average reachable count per area.
+- *Voronoi*: territory per station, colored by reachable count.
+    """)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Stations", f"{len(reach_df):,}")
@@ -300,5 +323,20 @@ elif view_mode == "Regions":
         st.bar_chart(region_agg["avg_travel_time"], color="#08519c")
 
     st.dataframe(region_agg, use_container_width=True)
+
+elif view_mode == "Voronoi":
+    st.markdown("Voronoi tessellation — each cell colored by its station's reachable count.")
+    vm = render_voronoi_map(
+        reach_df, "reachable_count",
+        color_fn=lambda v, vmin, vmax: ratio_to_blue(
+            (v - vmin) / max(vmax - vmin, 1)),
+        tooltip_fn=lambda r: (
+            f"<b>{r['station_name']}</b><br/>"
+            f"Reachable: {r['reachable_count']} stations<br/>"
+            f"Avg travel: {r['avg_travel_time']:.0f} min"
+        ),
+        prov_geo=data["prov_geo"],
+    )
+    st_folium(vm, use_container_width=True, height=700, key="reach_voronoi_map")
 
 render_footer()

@@ -85,6 +85,31 @@ st.caption(
     f"— Departures {departure_window[0]}h–{departure_window[1]}h"
 )
 
+with st.expander("ℹ️ How is this computed?"):
+    st.markdown("""
+**Three dimensions of station connectivity**
+
+Each station is scored on three independent metrics:
+
+| Metric | Name | How it's computed |
+|--------|------|-------------------|
+| **A** | Reachable destinations | Number of stations reachable within the time budget (same BFS algorithm as Station Reach). |
+| **B** | Direct frequency | Average number of direct train departures per hour, counted between 6:00 and 22:00 (16 hours), normalised across feeds. |
+| **C** | Cardinal reach (km) | For each reachable station, determine its cardinal direction (N/E/S/W) based on lat/lon relative to the origin. Keep the farthest station in each direction. Sum the four maximum distances. This measures *how far* you can go in every direction. |
+
+**Station size classification**
+- **Small**: < 4 direct trains/hour (B < 4)
+- **Medium**: 4–10 direct trains/hour
+- **Big**: > 10 direct trains/hour
+
+**Scatter plots**
+- Three pairs are shown: A×B, B×C, A×C. In each, the *third* metric is used for circle size.
+- Points are colored by region (Brussels, Flanders, Wallonia).
+- Separate tabs per station size for clarity.
+
+**Size comparison table**: averages of A, B, C grouped by station size.
+    """)
+
 # Size breakdown metrics
 size_counts = df_all["station_size"].value_counts()
 c1, c2, c3, c4 = st.columns(4)

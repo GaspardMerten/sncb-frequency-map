@@ -1,9 +1,15 @@
 """Map rendering functions for Folium maps."""
 
+import io
+import base64
+import json
+
 import numpy as np
 import folium
 import branca.colormap as cm
 from branca.element import MacroElement, Template
+from shapely.geometry import MultiPoint, shape, mapping, Point
+from shapely.ops import voronoi_diagram, unary_union
 
 # Stronger, more visible blue palette
 PALETTE = ["#c6dbef", "#6baed6", "#3182bd", "#2171b5", "#08519c", "#042f6b"]
@@ -187,5 +193,205 @@ def render_reach_choropleth(geo_features, totals, colormap, name_key, tooltip_fn
             tooltip=tooltip_fn(name, total),
         ).add_to(m)
     colormap.add_to(m)
+    _add_legend_css(m)
+    return m
+
+
+# ---------------------------------------------------------------------------
+# Voronoi map
+# ---------------------------------------------------------------------------
+
+def render_voronoi_map(df, value_col, color_fn, tooltip_fn, prov_geo):
+    """Render a Voronoi tessellation colored by a per-station value.
+
+    Parameters
+    ----------
+    df : DataFrame with columns lat, lon, station_name, and *value_col*.
+    value_col : column name for the numeric value to color by.
+    color_fn : callable(value, vmin, vmax) -> hex color string.
+    tooltip_fn : callable(row_dict) -> tooltip string.
+    prov_geo : provinces GeoJSON dict used to clip cells to Belgium border.
+    """
+    df_ok = df[df[value_col].notna()].copy()
+    if df_ok.empty:
+        return folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
+
+    # Build Belgium border as a union of province polygons
+    province_shapes = [shape(f["geometry"]) for f in prov_geo["features"]]
+    belgium = unary_union(province_shapes).buffer(0)
+
+    # Voronoi from station points (lon, lat order for Shapely)
+    points = MultiPoint([(row["lon"], row["lat"]) for _, row in df_ok.iterrows()])
+    vd = voronoi_diagram(points, envelope=belgium.envelope.buffer(0.5))
+
+    # Map each Voronoi cell to the station it belongs to (nearest point)
+    station_coords = list(zip(df_ok["lon"].values, df_ok["lat"].values))
+    station_values = df_ok[value_col].values
+    rows_list = df_ok.to_dict("records")
+
+    vmin = float(df_ok[value_col].min())
+    vmax = float(df_ok[value_col].max())
+
+    m = folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
+
+    for cell in vd.geoms:
+        centroid = cell.centroid
+        best_idx, best_dist = 0, float("inf")
+        for i, (sx, sy) in enumerate(station_coords):
+            d = (centroid.x - sx) ** 2 + (centroid.y - sy) ** 2
+            if d < best_dist:
+                best_dist, best_idx = d, i
+
+        val = float(station_values[best_idx])
+        color = color_fn(val, vmin, vmax)
+        tip = tooltip_fn(rows_list[best_idx])
+
+        clipped = cell.intersection(belgium)
+        if clipped.is_empty:
+            continue
+
+        geojson = mapping(clipped)
+        folium.GeoJson(
+            {"type": "Feature", "geometry": geojson, "properties": {}},
+            style_function=lambda _, c=color: {
+                "fillColor": c, "color": "#666",
+                "weight": 0.5, "fillOpacity": 0.7,
+            },
+            tooltip=tip,
+        ).add_to(m)
+
+    return m
+
+
+# ---------------------------------------------------------------------------
+# Gradient (continuous heatmap) for Travel Duration
+# ---------------------------------------------------------------------------
+
+# Transport mode speeds in km/h
+TRANSPORT_SPEEDS = {"Walk": 5, "Bike": 15, "Car": 50}
+
+
+def render_gradient_map(df, max_time, transport_mode, prov_geo, resolution=200, mile_kind="last"):
+    """Render a continuous heatmap of total travel time across Belgium.
+
+    For each grid cell: total_time = station_travel_time + first/last_mile_time,
+    where first/last_mile_time uses Manhattan distance to the nearest station
+    at the given transport mode speed.
+    """
+    from .geo import BE_LAT_MIN, BE_LAT_MAX, BE_LON_MIN, BE_LON_MAX
+
+    df_ok = df[df["travel_time"].notna()].copy()
+    if df_ok.empty:
+        return folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
+
+    speed_kmh = TRANSPORT_SPEEDS.get(transport_mode, 5)
+
+    s_lats = df_ok["lat"].values.astype(np.float64)
+    s_lons = df_ok["lon"].values.astype(np.float64)
+    s_times = df_ok["travel_time"].values.astype(np.float64)
+
+    lat_lin = np.linspace(BE_LAT_MIN, BE_LAT_MAX, resolution)
+    lon_lin = np.linspace(BE_LON_MIN, BE_LON_MAX, resolution)
+
+    # Fully vectorized grid computation
+    # grid_lat shape: (resolution, 1), grid_lon shape: (1, resolution)
+    grid_lat = lat_lin[:, None]  # (R, 1)
+    grid_lon = lon_lin[None, :]  # (1, R)
+
+    # Process in chunks to avoid huge memory (resolution² × n_stations)
+    chunk = 20
+    grid_time = np.full((resolution, resolution), np.inf)
+    for s_start in range(0, len(s_lats), chunk):
+        s_end = min(s_start + chunk, len(s_lats))
+        # shapes: dlat (R, 1, chunk), dlon (1, R, chunk)
+        dlat = np.abs(grid_lat[:, :, None] - s_lats[None, None, s_start:s_end]) * 111.0
+        dlon = np.abs(grid_lon[:, :, None] - s_lons[None, None, s_start:s_end]) * 71.0
+        total = s_times[None, None, s_start:s_end] + (dlat + dlon) / speed_kmh * 60.0
+        np.minimum(grid_time, total.min(axis=2), out=grid_time)
+
+    # Vectorized Belgium border mask using rasterization
+    province_shapes = [shape(f["geometry"]) for f in prov_geo["features"]]
+    belgium = unary_union(province_shapes).buffer(0)
+
+    # Sample border at coarse grid, then refine only border cells
+    mask = np.zeros((resolution, resolution), dtype=bool)
+    from shapely import prepared as shp_prepared
+    belgium_prep = shp_prepared.prep(belgium)
+
+    # Coarse pass: check every 4th cell
+    step = 4
+    for i in range(0, resolution, step):
+        for j in range(0, resolution, step):
+            inside = belgium_prep.contains(Point(lon_lin[j], lat_lin[i]))
+            # Fill the step×step block
+            i_end = min(i + step, resolution)
+            j_end = min(j + step, resolution)
+            if inside:
+                mask[i:i_end, j:j_end] = True
+
+    # Refine: re-check cells near block boundaries (where mask changes)
+    for i in range(resolution):
+        for j in range(resolution):
+            # Only re-check cells at block edges
+            bi, bj = i % step, j % step
+            if bi == 0 or bj == 0 or bi == step - 1 or bj == step - 1:
+                mask[i, j] = belgium_prep.contains(Point(lon_lin[j], lat_lin[i]))
+
+    grid_time[~mask] = np.nan
+
+    effective_max = min(float(np.nanmax(grid_time)), max_time) if not np.all(np.isnan(grid_time)) else max_time
+    grid_display = np.clip(grid_time, 0, effective_max)
+
+    # Vectorized RGBA computation (no per-pixel string parsing)
+    ratio = grid_display / effective_max if effective_max > 0 else np.zeros_like(grid_display)
+    ratio = np.clip(ratio, 0, 1)
+
+    r = np.zeros((resolution, resolution), dtype=np.uint8)
+    g = np.zeros((resolution, resolution), dtype=np.uint8)
+    b = np.zeros((resolution, resolution), dtype=np.uint8)
+
+    lo = ratio < 0.5
+    hi = ~lo
+    r2_lo = ratio * 2
+    r2_hi = (ratio - 0.5) * 2
+
+    r[lo] = np.clip(34 + (255 - 34) * r2_lo[lo], 0, 255).astype(np.uint8)
+    g[lo] = np.clip(180 - 40 * r2_lo[lo], 0, 255).astype(np.uint8)
+    b[lo] = np.clip(34 - 30 * r2_lo[lo], 0, 255).astype(np.uint8)
+
+    r[hi] = np.clip(255 - 35 * r2_hi[hi], 0, 255).astype(np.uint8)
+    g[hi] = np.clip(140 - 120 * r2_hi[hi], 0, 255).astype(np.uint8)
+    b[hi] = np.clip(4 + 30 * r2_hi[hi], 0, 255).astype(np.uint8)
+
+    valid = mask & ~np.isnan(grid_display)
+    rgba = np.zeros((resolution, resolution, 4), dtype=np.uint8)
+    rgba[valid, 0] = r[valid]
+    rgba[valid, 1] = g[valid]
+    rgba[valid, 2] = b[valid]
+    rgba[valid, 3] = 180
+
+    rgba_flipped = np.flipud(rgba)
+
+    from PIL import Image
+    img = Image.fromarray(rgba_flipped, "RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    img_b64 = base64.b64encode(buf.read()).decode()
+
+    m = folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
+    folium.raster_layers.ImageOverlay(
+        image=f"data:image/png;base64,{img_b64}",
+        bounds=[[BE_LAT_MIN, BE_LON_MIN], [BE_LAT_MAX, BE_LON_MAX]],
+        opacity=0.75,
+        interactive=False,
+    ).add_to(m)
+
+    cmap = cm.LinearColormap(
+        colors=["#22b422", "#ffcc00", "#dd2020"],
+        vmin=0, vmax=effective_max,
+        caption=f"Total travel time (min) — {mile_kind} mile by {transport_mode}",
+    )
+    cmap.add_to(m)
     _add_legend_css(m)
     return m

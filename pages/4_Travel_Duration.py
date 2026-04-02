@@ -12,7 +12,7 @@ from streamlit_folium import st_folium
 from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data, render_footer
 from logic.geo import build_region_geojson, get_province, PROVINCE_TO_REGION
 from logic.reachability import compute_reachability_single, compute_reachability_to_dest
-from logic.rendering import make_step_colormap, render_reach_choropleth, duration_color
+from logic.rendering import make_step_colormap, render_reach_choropleth, duration_color, render_voronoi_map, render_gradient_map, TRANSPORT_SPEEDS
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -20,7 +20,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown('<p class="sidebar-section">View</p>', unsafe_allow_html=True)
-    view_mode = st.radio("Display", ["Stations", "Provinces", "Regions"],
+    view_mode = st.radio("Display", ["Stations", "Provinces", "Regions", "Voronoi", "Gradient"],
                          label_visibility="collapsed", horizontal=True)
     st.markdown('<hr class="sidebar-divider"/>', unsafe_allow_html=True)
     st.markdown('<p class="sidebar-section">Duration settings</p>', unsafe_allow_html=True)
@@ -33,6 +33,18 @@ with st.sidebar:
     departure_window = st.slider("Departure window", 0, 24, (7, 9), step=1)
     transfer_penalty = st.slider("Min transfer time (min)", 0, 15, 5)
     max_transfers = st.slider("Max transfers", 0, 5, 3)
+    aggregation = st.radio("Multi-dest aggregation", ["Average", "Min", "Max"],
+                           horizontal=True,
+                           help="How to combine travel times when multiple destinations are selected.")
+    if view_mode == "Gradient":
+        mile_label = "First-mile transport" if direction == "To destination" else "Last-mile transport"
+        mile_help = ("Mode of transport from any point to the nearest station."
+                     if direction == "To destination"
+                     else "Mode of transport from the arrival station to the final point.")
+        transport_mode = st.radio(mile_label, list(TRANSPORT_SPEEDS.keys()),
+                                  horizontal=True, help=mile_help)
+    else:
+        transport_mode = "Walk"
 
 filters = render_sidebar_filters()
 data = load_all_data(filters)
@@ -131,8 +143,8 @@ def _build_duration_df(reachable, dest_id):
     return pd.DataFrame(rows)
 
 
-def _build_average_df():
-    """Build DataFrame averaging travel times across all destinations."""
+def _build_aggregate_df():
+    """Build DataFrame aggregating travel times across all destinations."""
     rows = []
     for sid, info in stop_lookup.items():
         times = []
@@ -145,9 +157,19 @@ def _build_average_df():
                 times.append(all_reachable[dest_id][sid]["travel_time"])
                 transfers_list.append(all_reachable[dest_id][sid]["transfers"])
 
-        avg_time = sum(times) / len(times) if times else None
-        avg_transfers = sum(transfers_list) / len(transfers_list) if transfers_list else None
-        rows.append({**_station_base(sid, info), "travel_time": avg_time, "transfers": avg_transfers})
+        if times:
+            if aggregation == "Min":
+                agg_time = min(times)
+                agg_transfers = min(transfers_list)
+            elif aggregation == "Max":
+                agg_time = max(times)
+                agg_transfers = max(transfers_list)
+            else:
+                agg_time = sum(times) / len(times)
+                agg_transfers = sum(transfers_list) / len(transfers_list)
+        else:
+            agg_time, agg_transfers = None, None
+        rows.append({**_station_base(sid, info), "travel_time": agg_time, "transfers": agg_transfers})
     return pd.DataFrame(rows)
 
 
@@ -249,6 +271,26 @@ def _render_region_view(df, dest_label):
     st.dataframe(region_agg, use_container_width=True)
 
 
+def _render_voronoi_view(df, dest_label, max_time, key_suffix):
+    vm = render_voronoi_map(
+        df, "travel_time",
+        color_fn=lambda v, vmin, vmax: duration_color(v, max(vmax, 1)),
+        tooltip_fn=lambda r: (
+            f"<b>{r['station_name']}</b><br/>"
+            f"Travel: {r['travel_time']:.0f} min"
+            + (f"<br/>Transfers: {r['transfers']:.1f}" if r.get('transfers') is not None else "")
+        ),
+        prov_geo=data["prov_geo"],
+    )
+    st_folium(vm, use_container_width=True, height=500, key=f"dur_vor_{key_suffix}")
+
+
+def _render_gradient_view(df, max_time, key_suffix):
+    mile_kind = "first" if direction == "To destination" else "last"
+    gm = render_gradient_map(df, max_time, transport_mode, data["prov_geo"], mile_kind=mile_kind)
+    st_folium(gm, use_container_width=True, height=500, key=f"dur_grad_{key_suffix}")
+
+
 # ── Header ───────────────────────────────────────────────────────────────────
 
 dest_str = ", ".join(destination_names)
@@ -260,6 +302,27 @@ st.caption(
     f"{window_label} {departure_window[0]}h–{departure_window[1]}h"
 )
 
+with st.expander("ℹ️ How is this computed?"):
+    st.markdown("""
+**What it measures**
+
+Travel time (in minutes) from every station in Belgium to/from one or more selected destinations.
+
+**Algorithm**
+- Uses the same BFS timetable search as Station Reach, but focused on a single destination.
+- **"To destination"**: for each origin station, find the fastest way to arrive at the destination within the departure window (uses a *reverse* timetable graph — searching backwards from arrivals).
+- **"From destination"**: starting from the destination, find how long it takes to reach every other station.
+
+**Multiple destinations**
+- When several destinations are selected, travel times are combined using the chosen aggregation: *Average*, *Min* (best case), or *Max* (worst case).
+
+**Views**
+- *Stations*: circle size and color reflect travel time (green = fast, red = slow).
+- *Provinces / Regions*: average travel time per area.
+- *Voronoi*: territory per station, colored by travel time.
+- *Gradient*: continuous heatmap across Belgium. For each point on the map, the total time = *train travel time to nearest station* + *first/last-mile travel time* (using Manhattan distance at the selected transport speed: Walk 5 km/h, Bike 15 km/h, Car 50 km/h). The label adapts to the direction: **first-mile** when travelling *to* a destination (getting to the station), **last-mile** when travelling *from* a destination (leaving the station). Shows accessibility deserts where stations are far away.
+    """)
+
 # Compute global max time for consistent coloring
 all_times = []
 for dest_id in destination_ids:
@@ -270,18 +333,23 @@ global_max_time = max(all_times) if all_times else 1
 # ── Render per destination + average ─────────────────────────────────────────
 
 if len(destination_ids) > 1:
-    # Average map first
-    avg_df = _build_average_df()
-    st.subheader(f"Average across {len(destination_names)} destinations")
+    # Aggregated map first
+    agg_label = aggregation.lower()
+    avg_df = _build_aggregate_df()
+    st.subheader(f"{aggregation} across {len(destination_names)} destinations")
     n_ok = avg_df["travel_time"].notna().sum()
     st.caption(f"{n_ok}/{len(avg_df)} stations reachable from at least one destination")
 
     if view_mode == "Stations":
         _render_station_map(avg_df, None, global_max_time, "avg")
     elif view_mode == "Provinces":
-        _render_province_view(avg_df, "average")
+        _render_province_view(avg_df, f"{agg_label} of destinations")
     elif view_mode == "Regions":
-        _render_region_view(avg_df, "average")
+        _render_region_view(avg_df, f"{agg_label} of destinations")
+    elif view_mode == "Voronoi":
+        _render_voronoi_view(avg_df, f"{agg_label} of destinations", global_max_time, "avg")
+    elif view_mode == "Gradient":
+        _render_gradient_view(avg_df, global_max_time, "avg")
 
 # Individual maps
 for dest_name, dest_id in zip(destination_names, destination_ids):
@@ -296,6 +364,10 @@ for dest_name, dest_id in zip(destination_names, destination_ids):
         _render_province_view(df, dest_name)
     elif view_mode == "Regions":
         _render_region_view(df, dest_name)
+    elif view_mode == "Voronoi":
+        _render_voronoi_view(df, dest_name, global_max_time, dest_name.replace(" ", "_"))
+    elif view_mode == "Gradient":
+        _render_gradient_view(df, global_max_time, dest_name.replace(" ", "_"))
 
     with st.expander(f"Data table — {dest_name}"):
         display = df_ok[["station_name", "travel_time", "transfers", "province", "region"]].copy()

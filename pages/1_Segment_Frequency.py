@@ -14,7 +14,7 @@ from logic.matching import (
     map_frequencies_to_infra, mergure_segments,
     check_network_connectivity, build_infra_graph,
 )
-from logic.rendering import make_step_colormap, render_segment_map, render_choropleth
+from logic.rendering import make_step_colormap, render_segment_map, render_choropleth, ratio_to_blue, render_voronoi_map
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -22,7 +22,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown('<p class="sidebar-section">View</p>', unsafe_allow_html=True)
-    view_mode = st.radio("Display", ["Segments", "Provinces", "Regions"],
+    view_mode = st.radio("Display", ["Segments", "Provinces", "Regions", "Voronoi"],
                          label_visibility="collapsed", horizontal=True)
 
 filters = render_sidebar_filters()
@@ -75,6 +75,33 @@ if filters["exclude_sch"]:
 hol_str = " | " + ", ".join(hol_parts) if hol_parts else ""
 
 st.caption(f"**{period_str}** — {days_str}{hour_str}{hol_str} — {filters['day_count']} days averaged")
+
+with st.expander("ℹ️ How is this computed?"):
+    st.markdown("""
+**Data sources**
+- **GTFS feeds** from SNCB/NMBS, fetched via the MobilityTwin API (one snapshot per month in range).
+- **Infrabel infrastructure** segments and operational points (track geometry).
+
+**Segment frequency**
+1. For each GTFS trip active on the selected days, consecutive stops are paired into *segments*.
+2. Each segment is weighted by its `service_day_count` (how many selected days that service runs), then divided by the number of days to get an **average daily frequency**.
+3. When multiple GTFS feeds (months) are loaded, segment counts are accumulated across feeds and normalised.
+4. Pass-through stops (where the train doesn't board/alight passengers) are still counted — the train physically uses the track.
+
+**Mapping to real tracks**
+1. Each GTFS station is matched to its nearest Infrabel operational point (within 1 km).
+2. If a direct Infrabel segment exists between the two mapped points, its geometry is used.
+3. Otherwise, a shortest-path (BFS, up to 30 hops) through the Infrabel network finds intermediate segments.
+4. Segments with no match fall back to a straight line between the GTFS coordinates.
+
+**Overlap resolution ("mergure")**
+- Segments connecting the same station pair with overlapping geometry are merged (frequencies summed).
+
+**Views**
+- *Segments*: each track segment colored by daily frequency.
+- *Provinces / Regions*: total segment-frequency aggregated by the province/region of each segment midpoint.
+- *Voronoi*: each station generates a territory; cells are colored by station frequency (sum of touching segments).
+    """)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Track segments", f"{len(segments_merged):,}")
@@ -172,5 +199,27 @@ elif view_mode == "Regions":
                               lambda n, t: f"{n}: {t:.0f} segment-trains/day")
         st_folium(m, use_container_width=True, height=700, key="region_map")
     st.dataframe(region_stats, use_container_width=True)
+
+elif view_mode == "Voronoi":
+    st.markdown("Station frequency Voronoi — each cell colored by its station's total trains/day.")
+    if station_freqs and data["stop_lookup"]:
+        rows = []
+        for sid, freq in station_freqs.items():
+            info = data["stop_lookup"].get(sid)
+            if info:
+                rows.append({"station_name": info["name"], "lat": info["lat"],
+                              "lon": info["lon"], "frequency": freq})
+        if rows:
+            vor_df = pd.DataFrame(rows)
+            vm = render_voronoi_map(
+                vor_df, "frequency",
+                color_fn=lambda v, vmin, vmax: ratio_to_blue(
+                    (v - vmin) / max(vmax - vmin, 1)),
+                tooltip_fn=lambda r: f"<b>{r['station_name']}</b><br/>{r['frequency']:.0f} trains/day",
+                prov_geo=data["prov_geo"],
+            )
+            st_folium(vm, use_container_width=True, height=700, key="voronoi_map")
+    else:
+        st.warning("No station frequency data available.")
 
 render_footer()
