@@ -348,6 +348,8 @@ def render_gradient_map(df, max_time, transport_mode, prov_geo, resolution=200, 
                 mask[i, j] = belgium_prep.contains(Point(lon_lin[j], lat_lin[i]))
 
     grid_time[~mask] = np.nan
+    # Hide cells beyond the time budget
+    grid_time[grid_time > max_time] = np.nan
 
     effective_max = min(float(np.nanmax(grid_time)), max_time) if not np.all(np.isnan(grid_time)) else max_time
     grid_display = np.clip(grid_time, 0, effective_max)

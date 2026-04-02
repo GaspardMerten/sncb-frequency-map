@@ -14,6 +14,7 @@ segments = st.Page("pages/1_Segment_Frequency.py", title="Segment Frequency", ic
 reach = st.Page("pages/2_Station_Reach.py", title="Station Reach", icon="📍")
 connectivity = st.Page("pages/3_Station_Connectivity.py", title="Station Connectivity", icon="📊")
 duration = st.Page("pages/4_Travel_Duration.py", title="Travel Duration", icon="⏱️")
+multimodal = st.Page("pages/5_Multimodal_Duration.py", title="Multimodal Duration", icon="🚌")
 
-pg = st.navigation([home, segments, reach, connectivity, duration])
+pg = st.navigation([home, segments, reach, connectivity, duration, multimodal])
 pg.run()
