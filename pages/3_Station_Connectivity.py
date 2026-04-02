@@ -48,13 +48,15 @@ max_minutes = max_hours * 60
 
 @st.cache_data(show_spinner="Computing connectivity metrics...", ttl=3600)
 def _cached_metrics(station_ids_tuple, _departures, _stop_lookup, _prov_geo,
-                    max_minutes, max_transfers, transfer_penalty, departure_window):
+                    max_minutes, max_transfers, transfer_penalty, departure_window,
+                    n_feeds):
     return compute_connectivity_metrics(
         list(station_ids_tuple), _departures, _stop_lookup, _prov_geo,
         max_minutes=max_minutes,
         max_transfers=max_transfers,
         transfer_penalty_min=transfer_penalty,
         departure_window=departure_window,
+        n_feeds=n_feeds,
     )
 
 station_ids = list(data["stop_lookup"].keys())
@@ -62,6 +64,7 @@ df_all = _cached_metrics(
     tuple(sorted(station_ids)), data["station_departures"],
     data["stop_lookup"], data["prov_geo"],
     max_minutes, max_transfers, transfer_penalty, departure_window,
+    data.get("n_feeds", 1),
 )
 
 if df_all.empty:
@@ -153,7 +156,7 @@ def _scatter_section(subset, key_prefix):
 
     fig1 = px.scatter(
         subset, x="A_reachable", y="B_direct_freq",
-        labels=scatter_labels, **common,
+        size="C_avg_distance_km", labels=scatter_labels, **common,
     )
     st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_ab")
 
@@ -161,12 +164,14 @@ def _scatter_section(subset, key_prefix):
     with col1:
         fig2 = px.scatter(
             subset, x="B_direct_freq", y="C_avg_distance_km",
+            size="A_reachable",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
         st.plotly_chart(fig2, use_container_width=True, key=f"{key_prefix}_bc")
     with col2:
         fig3 = px.scatter(
             subset, x="A_reachable", y="C_avg_distance_km",
+            size="B_direct_freq",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
         st.plotly_chart(fig3, use_container_width=True, key=f"{key_prefix}_ac")

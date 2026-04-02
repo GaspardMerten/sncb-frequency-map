@@ -285,6 +285,7 @@ def _load_all_data_inner(filters: dict):
         "service_day_counts": dict(gtfs["service_day_counts"]),
         "stop_lookup": gtfs["stop_lookup"],
         "served_stations": gtfs["served_stations"],
+        "n_feeds": gtfs["n_feeds"],
         "gtfs_to_infra": gtfs_to_infra,
         "cluster_map": cluster_map,
     }
@@ -298,6 +299,7 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
     service_ids: set[str] = set()
     service_day_counts: dict[str, int] = defaultdict(int)
     served_stations: set[str] = set()
+    n_feeds = 0
 
     n_months = len(active_months)
     progress = st.progress(0, text="Loading GTFS data...")
@@ -325,6 +327,7 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
         if not sids:
             continue
 
+        n_feeds += 1
         stop_lookup.update(build_stop_lookup(feed))
         served_stations |= compute_served_stations(feed, sids, filters["hour_filter"])
 
@@ -352,6 +355,7 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
         "service_ids": service_ids,
         "service_day_counts": service_day_counts,
         "served_stations": served_stations,
+        "n_feeds": max(n_feeds, 1),
     }
 
 

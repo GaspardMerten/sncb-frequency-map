@@ -427,15 +427,18 @@ def compute_all_reachability(station_ids: list[str], station_departures: dict,
     return df
 
 
-def compute_direct_frequency(station_id: str, station_departures: dict) -> float:
+def compute_direct_frequency(station_id: str, station_departures: dict,
+                              n_feeds: int = 1) -> float:
     """Average hourly frequency of direct (no-transfer) destinations from a station.
 
     Counts unique trips departing between 6h and 22h (16h window).
-    Returns total direct departures / 16.
+    Normalises by n_feeds (number of GTFS feeds accumulated) to avoid
+    inflating the count when data spans multiple months.
+    Returns total direct departures / 16 / n_feeds.
     """
     departures = station_departures.get(station_id, [])
     count = sum(1 for dep_min, _, _, _ in departures if 360 <= dep_min < 1320)
-    return count / 16.0
+    return count / 16.0 / max(n_feeds, 1)
 
 
 # Station size thresholds (trains/hour)
@@ -458,6 +461,7 @@ def compute_connectivity_metrics(station_ids: list[str],
                                   max_transfers: int = 2,
                                   transfer_penalty_min: int = 5,
                                   departure_window: tuple[int, int] = (8, 9),
+                                  n_feeds: int = 1,
                                   progress_callback=None) -> pd.DataFrame:
     """Compute per-station connectivity metrics A, B, C.
 
@@ -478,7 +482,7 @@ def compute_connectivity_metrics(station_ids: list[str],
         )
 
         a_count = len(reachable)
-        b_freq = compute_direct_frequency(sid, station_departures)
+        b_freq = compute_direct_frequency(sid, station_departures, n_feeds=n_feeds)
         distances = [r["distance_km"] for r in reachable.values() if r.get("distance_km")]
         c_dist = sum(distances) / len(distances) if distances else 0.0
 
