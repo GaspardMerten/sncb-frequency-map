@@ -187,13 +187,17 @@ def build_infra_segment_index(infrabel_segs: dict,
             continue
         fid = str(props.get("stationfrom_id", "")).strip()
         tid = str(props.get("stationto_id", "")).strip()
+        if not fid or not tid or fid == tid:
+            continue
         if cluster_map:
-            fid = cluster_map.get(fid, fid)
-            tid = cluster_map.get(tid, tid)
-        if fid and tid and fid != tid:
-            key = tuple(sorted([fid, tid]))
-            if key not in index or len(coords) > len(index[key]):
-                index[key] = coords
+            c_fid = cluster_map.get(fid, fid)
+            c_tid = cluster_map.get(tid, tid)
+            # Only apply clustering when it doesn't collapse the pair
+            if c_fid != c_tid:
+                fid, tid = c_fid, c_tid
+        key = tuple(sorted([fid, tid]))
+        if key not in index or len(coords) > len(index[key]):
+            index[key] = coords
     return index
 
 
@@ -208,16 +212,20 @@ def build_infra_graph(infrabel_segs: dict,
         props = feat.get("properties", {})
         fid = str(props.get("stationfrom_id", "")).strip()
         tid = str(props.get("stationto_id", "")).strip()
+        if not fid or not tid or fid == tid:
+            continue
         if cluster_map:
-            fid = cluster_map.get(fid, fid)
-            tid = cluster_map.get(tid, tid)
-        if fid and tid and fid != tid:
-            graph[fid].add(tid)
-            graph[tid].add(fid)
+            c_fid = cluster_map.get(fid, fid)
+            c_tid = cluster_map.get(tid, tid)
+            # Only apply clustering when it doesn't collapse the pair
+            if c_fid != c_tid:
+                fid, tid = c_fid, c_tid
+        graph[fid].add(tid)
+        graph[tid].add(fid)
     return dict(graph)
 
 
-def find_path(graph: dict, start: str, end: str, max_depth: int = 15) -> list[str] | None:
+def find_path(graph: dict, start: str, end: str, max_depth: int = 30) -> list[str] | None:
     """BFS shortest path between two Infrabel stations."""
     if start == end:
         return [start]
@@ -271,10 +279,15 @@ def build_infra_names(infrabel_segs: dict,
         for id_key, name_key in [("stationfrom_id", "stationfrom_name"),
                                   ("stationto_id", "stationto_name")]:
             sid = str(props.get(id_key, "")).strip()
+            if not sid:
+                continue
+            # Store name under original ID
+            names.setdefault(sid, props.get(name_key, sid))
+            # Also store under canonical (clustered) ID if different
             if cluster_map:
-                sid = cluster_map.get(sid, sid)
-            if sid:
-                names.setdefault(sid, props.get(name_key, sid))
+                canonical = cluster_map.get(sid, sid)
+                if canonical != sid:
+                    names.setdefault(canonical, props.get(name_key, sid))
     return names
 
 
@@ -285,7 +298,13 @@ def build_infra_names(infrabel_segs: dict,
 def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
                               gtfs_to_infra, prov_geo,
                               cluster_map: dict[str, str] | None = None):
-    """Resolve GTFS stop-pair frequencies onto Infrabel track segments via BFS."""
+    """Resolve GTFS stop-pair frequencies onto Infrabel track segments via BFS.
+
+    Every GTFS segment whose train physically uses a piece of track should
+    be visible on the map.  When an Infrabel segment geometry exists for a hop
+    we use it; otherwise we fall back to a straight line between the GTFS
+    coordinates so that no track is silently dropped.
+    """
     infra_index = build_infra_segment_index(infrabel_segs, cluster_map)
     infra_graph = build_infra_graph(infrabel_segs, cluster_map)
     infra_names = build_infra_names(infrabel_segs, cluster_map)
@@ -303,6 +322,8 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
 
         infra_a = gtfs_to_infra.get(stop_a)
         infra_b = gtfs_to_infra.get(stop_b)
+
+        # Both GTFS stops map to the same infra station, or one isn't mapped
         if not infra_a or not infra_b or infra_a == infra_b:
             fallback_pairs[(stop_a, stop_b)] += freq
             stats["dropped"] += 1
@@ -316,18 +337,11 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
         else:
             path = find_path(infra_graph, infra_a, infra_b)
             if path and len(path) >= 2:
-                found_any = False
                 for i in range(len(path) - 1):
                     seg_key = tuple(sorted([path[i], path[i + 1]]))
-                    if seg_key in infra_index:
-                        infra_freq[seg_key] += freq
-                        found_any = True
-                if found_any:
-                    stats["path"] += 1
-                    stats["mapped"] += 1
-                else:
-                    fallback_pairs[(stop_a, stop_b)] += freq
-                    stats["dropped"] += 1
+                    infra_freq[seg_key] += freq
+                stats["path"] += 1
+                stats["mapped"] += 1
             else:
                 fallback_pairs[(stop_a, stop_b)] += freq
                 stats["dropped"] += 1
@@ -338,6 +352,7 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
             continue
         coords = infra_index.get((id_a, id_b))
         if not coords:
+            # BFS path hop without geometry — skip (no geometry to draw)
             continue
         latlon = coords_to_latlon(coords)
         if len(latlon) < 2:
@@ -411,6 +426,15 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
                     continue
 
                 seg_i, seg_j = working[i], working[j]
+
+                # Only consider merging when both endpoints match; segments
+                # connecting different station pairs must stay separate even
+                # when their track geometry overlaps.
+                pair_i = (seg_i["id_a"], seg_i["id_b"])
+                pair_j = (seg_j["id_a"], seg_j["id_b"])
+                if set(pair_i) != set(pair_j):
+                    continue
+
                 ci, cj = seg_i["coords"], seg_j["coords"]
                 if len(ci) < 2 or len(cj) < 2:
                     continue

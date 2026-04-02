@@ -453,6 +453,42 @@ def station_size(freq_per_hour: float) -> str:
     return "Big"
 
 
+def _cardinal_reach(origin_id: str, reachable: dict, stop_lookup: dict) -> float:
+    """Sum of the maximum reachable distance in each cardinal direction.
+
+    For every reachable station, determine which quadrant (N/E/S/W) it falls
+    into relative to the origin using latitude/longitude differences, then
+    keep the farthest station per quadrant and return the sum of those four
+    maximum distances.
+    """
+    origin = stop_lookup.get(origin_id)
+    if not origin:
+        return 0.0
+    o_lat, o_lon = origin["lat"], origin["lon"]
+
+    # max distance per quadrant: N, E, S, W
+    best = {"N": 0.0, "E": 0.0, "S": 0.0, "W": 0.0}
+
+    for dest_id, info in reachable.items():
+        d_km = info.get("distance_km", 0)
+        if not d_km:
+            continue
+        dest = stop_lookup.get(dest_id)
+        if not dest:
+            continue
+        dlat = dest["lat"] - o_lat
+        dlon = dest["lon"] - o_lon
+        # Dominant axis decides the quadrant
+        if abs(dlat) >= abs(dlon):
+            direction = "N" if dlat >= 0 else "S"
+        else:
+            direction = "E" if dlon >= 0 else "W"
+        if d_km > best[direction]:
+            best[direction] = d_km
+
+    return sum(best.values())
+
+
 def compute_connectivity_metrics(station_ids: list[str],
                                   station_departures: dict,
                                   stop_lookup: dict,
@@ -467,7 +503,7 @@ def compute_connectivity_metrics(station_ids: list[str],
 
     A: Number of destinations reachable within max_minutes with <= max_transfers.
     B: Average hourly direct frequency (trains 6h-22h / 16).
-    C: Mean distance (km) across all reachable destinations.
+    C: Sum of max reach (km) in each cardinal direction (N + E + S + W).
     """
     rows = []
     total = len(station_ids)
@@ -483,14 +519,13 @@ def compute_connectivity_metrics(station_ids: list[str],
 
         a_count = len(reachable)
         b_freq = compute_direct_frequency(sid, station_departures, n_feeds=n_feeds)
-        distances = [r["distance_km"] for r in reachable.values() if r.get("distance_km")]
-        c_dist = sum(distances) / len(distances) if distances else 0.0
+        c_reach = _cardinal_reach(sid, reachable, stop_lookup)
 
         row = _station_row(
             sid, stop_lookup, prov_geo,
             A_reachable=a_count,
             B_direct_freq=round(b_freq, 2),
-            C_avg_distance_km=round(c_dist, 1),
+            C_reach_km=round(c_reach, 1),
             station_size=station_size(b_freq),
         )
         if row:

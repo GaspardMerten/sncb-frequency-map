@@ -77,7 +77,7 @@ with col3:
     <div class="card">
         <div class="card-icon">&#128200;</div>
         <h3>Station Connectivity</h3>
-        <p>Scatter plots: reachable destinations, direct frequency, avg distance.</p>
+        <p>Scatter plots: reachable destinations, direct frequency, cardinal reach.</p>
         <span class="badge">SCATTER ANALYSIS</span>
     </div>
     """, unsafe_allow_html=True)

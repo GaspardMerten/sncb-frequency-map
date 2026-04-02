@@ -3,7 +3,7 @@
 Scatter plots combining three dimensions per station:
 A: Reachable destinations (within time budget, max transfers)
 B: Average hourly direct frequency (6h-22h)
-C: Average distance (km) across reachable destinations
+C: Sum of max reach (km) in each cardinal direction (N+E+S+W)
 
 Stations are classified by size based on direct frequency:
 Small (< 4 trains/h), Medium (4-10), Big (> 10).
@@ -136,7 +136,7 @@ REGION_COLORS = {
 scatter_labels = {
     "A_reachable": f"Reachable destinations ({max_hours}h, {max_transfers} transfers)",
     "B_direct_freq": "Avg direct trains/hour (6h-22h)",
-    "C_avg_distance_km": "Avg distance (km) to reachable stations",
+    "C_reach_km": "Reach N+E+S+W (km)",
 }
 
 
@@ -156,21 +156,21 @@ def _scatter_section(subset, key_prefix):
 
     fig1 = px.scatter(
         subset, x="A_reachable", y="B_direct_freq",
-        size="C_avg_distance_km", labels=scatter_labels, **common,
+        size="C_reach_km", labels=scatter_labels, **common,
     )
     st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_ab")
 
     col1, col2 = st.columns(2)
     with col1:
         fig2 = px.scatter(
-            subset, x="B_direct_freq", y="C_avg_distance_km",
+            subset, x="B_direct_freq", y="C_reach_km",
             size="A_reachable",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
         st.plotly_chart(fig2, use_container_width=True, key=f"{key_prefix}_bc")
     with col2:
         fig3 = px.scatter(
-            subset, x="A_reachable", y="C_avg_distance_km",
+            subset, x="A_reachable", y="C_reach_km",
             size="B_direct_freq",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
@@ -178,9 +178,9 @@ def _scatter_section(subset, key_prefix):
 
     with st.expander(f"Station data ({len(subset)} stations)"):
         display = subset[["station_name", "A_reachable", "B_direct_freq",
-                           "C_avg_distance_km", "region", "province", "station_size"]].copy()
+                           "C_reach_km", "region", "province", "station_size"]].copy()
         display.columns = ["Station", "Reachable (A)", "Direct freq/h (B)",
-                            "Avg dist km (C)", "Region", "Province", "Size"]
+                            "Reach NESW km (C)", "Region", "Province", "Size"]
         st.dataframe(display.sort_values("Reachable (A)", ascending=False).reset_index(drop=True),
                      use_container_width=True, height=300)
 
@@ -195,13 +195,13 @@ for tab, size_label in zip(tabs, active_sizes):
         n = len(subset)
         avg_a = subset["A_reachable"].mean()
         avg_b = subset["B_direct_freq"].mean()
-        avg_c = subset["C_avg_distance_km"].mean()
+        avg_c = subset["C_reach_km"].mean()
 
         mc1, mc2, mc3, mc4 = st.columns(4)
         mc1.metric("Stations", n)
         mc2.metric("Avg reachable", f"{avg_a:.1f}")
         mc3.metric("Avg freq/h", f"{avg_b:.2f}")
-        mc4.metric("Avg distance", f"{avg_c:.1f} km")
+        mc4.metric("Avg reach", f"{avg_c:.0f} km")
 
         _scatter_section(subset, size_label.lower())
 
@@ -212,9 +212,9 @@ size_agg = df.groupby("station_size").agg(
     count=("station_id", "count"),
     avg_A=("A_reachable", "mean"),
     avg_B=("B_direct_freq", "mean"),
-    avg_C=("C_avg_distance_km", "mean"),
+    avg_C=("C_reach_km", "mean"),
 ).reindex(SIZE_ORDER).dropna(how="all").round(2)
-size_agg.columns = ["Stations", "Avg reachable (A)", "Avg freq/h (B)", "Avg dist km (C)"]
+size_agg.columns = ["Stations", "Avg reachable (A)", "Avg freq/h (B)", "Reach NESW km (C)"]
 st.dataframe(size_agg, use_container_width=True)
 
 render_footer()
