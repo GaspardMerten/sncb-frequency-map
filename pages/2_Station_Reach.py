@@ -12,7 +12,7 @@ from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data, rend
 from logic.geo import build_region_geojson
 from logic.reachability import compute_reachability_single, compute_all_reachability
 from logic.matching import (
-    build_infra_segment_index, build_infra_graph, find_path,
+    build_infra_segment_index, build_infra_index_and_graph, find_path,
 )
 from logic.rendering import make_step_colormap, render_reach_choropleth, ratio_to_blue, duration_color, render_voronoi_map
 
@@ -202,8 +202,7 @@ if view_mode == "Stations":
         )
 
         # Build infra index for path rendering
-        infra_index = build_infra_segment_index(data["infrabel_segs"], cluster_map)
-        infra_graph = build_infra_graph(data["infrabel_segs"], cluster_map)
+        infra_index, infra_graph = build_infra_index_and_graph(data["infrabel_segs"], cluster_map)
 
         # Origin marker
         folium.CircleMarker(

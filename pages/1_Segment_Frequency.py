@@ -12,7 +12,7 @@ from logic.geo import build_region_geojson
 from logic.gtfs import compute_station_frequencies
 from logic.matching import (
     map_frequencies_to_infra, mergure_segments,
-    check_network_connectivity, build_infra_graph,
+    check_network_connectivity, build_infra_index_and_graph,
 )
 from logic.rendering import make_step_colormap, render_segment_map, render_choropleth, ratio_to_blue, render_voronoi_map
 
@@ -55,7 +55,7 @@ if not segments:
     st.warning("No segments found for the selected filters.")
     st.stop()
 
-infra_graph = build_infra_graph(data["infrabel_segs"], cluster_map)
+_, infra_graph = build_infra_index_and_graph(data["infrabel_segs"], cluster_map)
 components = check_network_connectivity(infra_graph)
 
 freqs_merged = [s["frequency"] for s in segments_merged]
@@ -132,19 +132,17 @@ with st.expander("Diagnostics"):
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def compute_group_stats(segs, key):
-    out = {}
-    for group in sorted(set(s[key] for s in segs)):
-        grp = [s for s in segs if s[key] == group]
-        total = sum(s["frequency"] for s in grp)
-        if total == 0:
-            continue
-        out[group] = {
-            "Segments": len(grp),
-            "Sum of freq.": round(total, 1),
-            "Avg freq./segment": round(total / len(grp), 1),
-            "Busiest segment": round(max(s["frequency"] for s in grp), 1),
-        }
-    return pd.DataFrame(out).T.sort_values("Sum of freq.", ascending=False)
+    df_segs = pd.DataFrame(segs)
+    if df_segs.empty or key not in df_segs.columns:
+        return pd.DataFrame()
+    grouped = df_segs.groupby(key)["frequency"].agg(
+        Segments="count",
+        **{"Sum of freq.": "sum"},
+        **{"Avg freq./segment": "mean"},
+        **{"Busiest segment": "max"},
+    ).round(1)
+    grouped = grouped[grouped["Sum of freq."] > 0]
+    return grouped.sort_values("Sum of freq.", ascending=False)
 
 # ── Map views ─────────────────────────────────────────────────────────────────
 

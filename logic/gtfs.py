@@ -54,6 +54,18 @@ def _build_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
     return dict(zip(sid, station))
 
 
+# Cache stop_to_station per feed to avoid rebuilding on each call
+_stop_to_station_cache: dict[int, dict] = {}
+
+
+def _get_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
+    """Cached version of _build_stop_to_station using DataFrame id."""
+    key = id(stops)
+    if key not in _stop_to_station_cache:
+        _stop_to_station_cache[key] = _build_stop_to_station(stops)
+    return _stop_to_station_cache[key]
+
+
 def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
     """Return boolean Series: True where the stop is a pass-through (no boarding/alighting).
 
@@ -104,7 +116,7 @@ def compute_segment_frequencies(feed: gk.Feed, service_ids: set[str],
     stop_times = feed.stop_times
     stops = feed.stops
 
-    stop_to_station = _build_stop_to_station(stops)
+    stop_to_station = _get_stop_to_station(stops)
 
     # Filter to active trips
     active_trips = trips.loc[trips["service_id"].isin(service_ids), ["trip_id", "service_id"]]
@@ -181,7 +193,7 @@ def compute_served_stations(feed: gk.Feed, service_ids: set[str],
     stops = feed.stops
     trips = feed.trips
 
-    stop_to_station = _build_stop_to_station(stops)
+    stop_to_station = _get_stop_to_station(stops)
 
     active_trip_ids = set(trips.loc[trips["service_id"].isin(service_ids), "trip_id"])
     st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()

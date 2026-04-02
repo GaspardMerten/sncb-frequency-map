@@ -6,6 +6,7 @@ build a timetable graph of (station, departure_time) -> (station, arrival_time)
 edges, then BFS with time constraints.
 """
 
+import bisect
 import heapq
 import pandas as pd
 import numpy as np
@@ -37,8 +38,8 @@ def build_timetable_graph(feed: gk.Feed, service_ids: set[str],
     stop_times = feed.stop_times
     stops = feed.stops
 
-    from .gtfs import _build_stop_to_station, _is_pass_through
-    stop_to_station = _build_stop_to_station(stops)
+    from .gtfs import _get_stop_to_station, _is_pass_through
+    stop_to_station = _get_stop_to_station(stops)
 
     active_trip_ids = set(trips.loc[trips["service_id"].isin(service_ids), "trip_id"])
     st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()
@@ -79,6 +80,16 @@ def build_timetable_graph(feed: gk.Feed, service_ids: set[str],
     return dict(station_departures)
 
 
+def _precompute_dep_times(station_departures: dict) -> dict:
+    """Pre-extract departure times as lists for fast bisect lookups."""
+    return {sid: [d[0] for d in deps] for sid, deps in station_departures.items()}
+
+
+def _precompute_arr_times(reverse_departures: dict) -> dict:
+    """Pre-extract arrival times as lists for fast bisect lookups."""
+    return {sid: [d[0] for d in deps] for sid, deps in reverse_departures.items()}
+
+
 def build_reverse_timetable_graph(station_departures: dict) -> dict:
     """Build a reverse timetable graph for backward-time BFS.
 
@@ -106,7 +117,8 @@ def build_reverse_timetable_graph(station_departures: dict) -> dict:
 def _bfs_reverse(station_id: str, reverse_departures: dict,
                  max_minutes: float, arrive_by: int,
                  max_transfers: int | None = None,
-                 transfer_penalty_min: int = 5) -> dict[str, dict]:
+                 transfer_penalty_min: int = 5,
+                 _arr_times: dict | None = None) -> dict[str, dict]:
     """Run backward BFS: find which stations can reach station_id by arrive_by.
 
     Uses the reverse timetable graph. Searches backward in time from the
@@ -135,13 +147,13 @@ def _bfs_reverse(station_id: str, reverse_departures: dict,
         arrivals = reverse_departures.get(current_station, [])
 
         # Binary search for arrivals at or before current_time (list is descending)
-        lo, hi = 0, len(arrivals)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if arrivals[mid][0] > current_time:
-                lo = mid + 1
-            else:
-                hi = mid
+        if _arr_times is not None:
+            atimes = _arr_times.get(current_station, [])
+        else:
+            atimes = [a[0] for a in arrivals]
+        # atimes is descending; find first index where value <= current_time
+        # bisect_left on negated values: find first -val >= -current_time
+        lo = bisect.bisect_left(atimes, -current_time, key=lambda x: -x)
 
         seen_prev_transfer = set()
         for idx in range(lo, len(arrivals)):
@@ -198,6 +210,7 @@ def compute_reachability_to_dest(station_id: str, reverse_departures: dict,
     travel time from each origin.
     """
     merged: dict[str, dict] = {}
+    _arr_times = _precompute_arr_times(reverse_departures)
 
     for hour in range(arrival_window[0], arrival_window[1]):
         arrive_by = hour * 60
@@ -205,6 +218,7 @@ def compute_reachability_to_dest(station_id: str, reverse_departures: dict,
             station_id, reverse_departures, max_minutes, arrive_by,
             max_transfers=max_transfers,
             transfer_penalty_min=transfer_penalty_min,
+            _arr_times=_arr_times,
         )
         for origin_id, info in reachable.items():
             if origin_id not in merged or info["travel_time"] < merged[origin_id]["travel_time"]:
@@ -217,7 +231,8 @@ def _bfs_single(station_id: str, station_departures: dict,
                 max_minutes: float, start_min: int,
                 stop_lookup: dict | None = None,
                 max_transfers: int | None = None,
-                transfer_penalty_min: int = 5) -> dict[str, dict]:
+                transfer_penalty_min: int = 5,
+                _dep_times: dict | None = None) -> dict[str, dict]:
     """Run BFS reachability from a single station starting at start_min.
 
     Tracks the current trip_id so that continuing on the same train does not
@@ -247,13 +262,11 @@ def _bfs_single(station_id: str, station_departures: dict,
         departures = station_departures.get(current_station, [])
 
         # Binary search for departures at or after current_time
-        lo, hi = 0, len(departures)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if departures[mid][0] < current_time:
-                lo = mid + 1
-            else:
-                hi = mid
+        if _dep_times is not None:
+            dtimes = _dep_times.get(current_station, [])
+        else:
+            dtimes = [d[0] for d in departures]
+        lo = bisect.bisect_left(dtimes, current_time)
 
         seen_next_transfer = set()
         for idx in range(lo, len(departures)):
@@ -333,6 +346,7 @@ def compute_reachability_single(station_id: str, station_departures: dict,
         departure_window: (start_hour, end_hour) — BFS runs once per hour.
     """
     merged: dict[str, dict] = {}
+    _dep_times = _precompute_dep_times(station_departures)
 
     for hour in range(departure_window[0], departure_window[1]):
         start_min = hour * 60
@@ -341,6 +355,7 @@ def compute_reachability_single(station_id: str, station_departures: dict,
             stop_lookup=stop_lookup,
             max_transfers=max_transfers,
             transfer_penalty_min=transfer_penalty_min,
+            _dep_times=_dep_times,
         )
         for dest_id, info in reachable.items():
             if dest_id not in merged or info["travel_time"] < merged[dest_id]["travel_time"]:
@@ -394,6 +409,7 @@ def compute_all_reachability(station_ids: list[str], station_departures: dict,
     max_minutes = max_hours * 60
     rows = []
     total = len(station_ids)
+    _dep_times = _precompute_dep_times(station_departures)
 
     for idx, sid in enumerate(station_ids):
         reachable = compute_reachability_single(
@@ -507,6 +523,7 @@ def compute_connectivity_metrics(station_ids: list[str],
     """
     rows = []
     total = len(station_ids)
+    _dep_times = _precompute_dep_times(station_departures)
 
     for idx, sid in enumerate(station_ids):
         reachable = compute_reachability_single(

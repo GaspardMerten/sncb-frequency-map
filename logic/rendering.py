@@ -14,6 +14,18 @@ from shapely.ops import voronoi_diagram, unary_union
 # Stronger, more visible blue palette
 PALETTE = ["#c6dbef", "#6baed6", "#3182bd", "#2171b5", "#08519c", "#042f6b"]
 
+# Module-level cache for Belgium border polygon
+_belgium_cache: dict[int, object] = {}
+
+
+def _get_belgium_border(prov_geo):
+    """Get or build cached Belgium border polygon."""
+    key = id(prov_geo)
+    if key not in _belgium_cache:
+        province_shapes = [shape(f["geometry"]) for f in prov_geo["features"]]
+        _belgium_cache[key] = unary_union(province_shapes).buffer(0)
+    return _belgium_cache[key]
+
 
 def make_step_colormap(values: list[float], caption: str) -> cm.StepColormap:
     """Build a quantile-based StepColormap for the given values."""
@@ -216,32 +228,31 @@ def render_voronoi_map(df, value_col, color_fn, tooltip_fn, prov_geo):
     if df_ok.empty:
         return folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
 
-    # Build Belgium border as a union of province polygons
-    province_shapes = [shape(f["geometry"]) for f in prov_geo["features"]]
-    belgium = unary_union(province_shapes).buffer(0)
+    # Build Belgium border from cache
+    belgium = _get_belgium_border(prov_geo)
 
     # Voronoi from station points (lon, lat order for Shapely)
     points = MultiPoint([(row["lon"], row["lat"]) for _, row in df_ok.iterrows()])
     vd = voronoi_diagram(points, envelope=belgium.envelope.buffer(0.5))
 
-    # Map each Voronoi cell to the station it belongs to (nearest point)
-    station_coords = list(zip(df_ok["lon"].values, df_ok["lat"].values))
+    # Vectorized cell-to-station matching using numpy
+    station_coords = np.array(list(zip(df_ok["lon"].values, df_ok["lat"].values)))
     station_values = df_ok[value_col].values
     rows_list = df_ok.to_dict("records")
+
+    cell_centroids = np.array([[cell.centroid.x, cell.centroid.y] for cell in vd.geoms])
+    # Compute all distances at once: (n_cells, n_stations)
+    diffs = cell_centroids[:, None, :] - station_coords[None, :, :]
+    dists_sq = (diffs ** 2).sum(axis=2)
+    best_indices = dists_sq.argmin(axis=1)
 
     vmin = float(df_ok[value_col].min())
     vmax = float(df_ok[value_col].max())
 
     m = folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
 
-    for cell in vd.geoms:
-        centroid = cell.centroid
-        best_idx, best_dist = 0, float("inf")
-        for i, (sx, sy) in enumerate(station_coords):
-            d = (centroid.x - sx) ** 2 + (centroid.y - sy) ** 2
-            if d < best_dist:
-                best_dist, best_idx = d, i
-
+    for cell_idx, cell in enumerate(vd.geoms):
+        best_idx = best_indices[cell_idx]
         val = float(station_values[best_idx])
         color = color_fn(val, vmin, vmax)
         tip = tooltip_fn(rows_list[best_idx])
@@ -309,9 +320,8 @@ def render_gradient_map(df, max_time, transport_mode, prov_geo, resolution=200, 
         total = s_times[None, None, s_start:s_end] + (dlat + dlon) / speed_kmh * 60.0
         np.minimum(grid_time, total.min(axis=2), out=grid_time)
 
-    # Vectorized Belgium border mask using rasterization
-    province_shapes = [shape(f["geometry"]) for f in prov_geo["features"]]
-    belgium = unary_union(province_shapes).buffer(0)
+    # Vectorized Belgium border mask using cached border
+    belgium = _get_belgium_border(prov_geo)
 
     # Sample border at coarse grid, then refine only border cells
     mask = np.zeros((resolution, resolution), dtype=bool)

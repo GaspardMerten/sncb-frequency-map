@@ -4,7 +4,7 @@ Uses Shapely STRtree for fast spatial indexing and buffered geometry operations.
 """
 
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from shapely.geometry import Point
 from shapely import STRtree
@@ -173,6 +173,37 @@ def _extract_point_coords(feat: dict) -> tuple:
 # Infrabel infrastructure graph
 # ---------------------------------------------------------------------------
 
+def build_infra_index_and_graph(infrabel_segs: dict,
+                                 cluster_map: dict[str, str] | None = None,
+                                 ) -> tuple[dict, dict]:
+    """Build both segment index and adjacency graph in a single pass."""
+    index = {}
+    graph: dict[str, set[str]] = defaultdict(set)
+    if not infrabel_segs or "features" not in infrabel_segs:
+        return index, dict(graph)
+    for feat in infrabel_segs["features"]:
+        props = feat.get("properties", {})
+        coords = feat.get("geometry", {}).get("coordinates", [])
+        fid = str(props.get("stationfrom_id", "")).strip()
+        tid = str(props.get("stationto_id", "")).strip()
+        if not fid or not tid or fid == tid:
+            continue
+        if cluster_map:
+            c_fid = cluster_map.get(fid, fid)
+            c_tid = cluster_map.get(tid, tid)
+            if c_fid != c_tid:
+                fid, tid = c_fid, c_tid
+        # Graph
+        graph[fid].add(tid)
+        graph[tid].add(fid)
+        # Index (only if we have coords)
+        if coords:
+            key = tuple(sorted([fid, tid]))
+            if key not in index or len(coords) > len(index[key]):
+                index[key] = coords
+    return index, dict(graph)
+
+
 def build_infra_segment_index(infrabel_segs: dict,
                                cluster_map: dict[str, str] | None = None,
                                ) -> dict[tuple[str, str], list]:
@@ -230,9 +261,9 @@ def find_path(graph: dict, start: str, end: str, max_depth: int = 30) -> list[st
     if start == end:
         return [start]
     visited = {start}
-    queue = [(start, [start])]
+    queue = deque([(start, [start])])
     while queue:
-        node, path = queue.pop(0)
+        node, path = queue.popleft()
         if len(path) > max_depth:
             continue
         for nb in graph.get(node, []):
@@ -305,8 +336,7 @@ def map_frequencies_to_infra(segment_freqs, stop_lookup, infrabel_segs,
     we use it; otherwise we fall back to a straight line between the GTFS
     coordinates so that no track is silently dropped.
     """
-    infra_index = build_infra_segment_index(infrabel_segs, cluster_map)
-    infra_graph = build_infra_graph(infrabel_segs, cluster_map)
+    infra_index, infra_graph = build_infra_index_and_graph(infrabel_segs, cluster_map)
     infra_names = build_infra_names(infrabel_segs, cluster_map)
     gtfs_to_infra = gtfs_to_infra or {}
 
@@ -406,13 +436,12 @@ def mergure_segments(segments: list[dict], buffer_km: float = 0.5,
 
     for iteration in range(max_iterations):
         changed = False
-        from shapely import STRtree as ST
         geoms = []
         for seg in working:
             ls = latlon_to_linestring(seg["coords"])
             geoms.append(ls.buffer(km_to_deg_buffer(buffer_km)) if ls else Point(0, 0).buffer(0.0001))
 
-        tree = ST(geoms)
+        tree = STRtree(geoms)
         merged_indices = set()
         new_segments = []
 
