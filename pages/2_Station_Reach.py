@@ -4,18 +4,17 @@ For each station, computes how many other stations are reachable within a
 user-specified time budget (including transfers), then visualizes connectivity.
 """
 
-import pandas as pd
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
 
-from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
-from logic.geo import build_region_geojson, PROVINCE_TO_REGION
+from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data, render_footer
+from logic.geo import build_region_geojson
 from logic.reachability import compute_reachability_single, compute_all_reachability
 from logic.matching import (
     build_infra_segment_index, build_infra_graph, find_path,
 )
-from logic.rendering import make_step_colormap, render_reach_choropleth
+from logic.rendering import make_step_colormap, render_reach_choropleth, ratio_to_blue, duration_color
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -88,25 +87,12 @@ reach_spread = max(max_reach - min_reach, 1)
 
 def _reach_color(count):
     ratio = (count - min_reach) / reach_spread
-    r = int(107 + (4 - 107) * ratio)
-    g = int(174 + (47 - 174) * ratio)
-    b = int(214 + (107 - 214) * ratio)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    return ratio_to_blue(ratio)
 
 
 def _time_color(travel_min, max_min):
     """Green (fast) -> yellow -> red (slow)."""
-    ratio = min(travel_min / max(max_min, 1), 1.0)
-    if ratio < 0.5:
-        r = int(34 + (255 - 34) * (ratio * 2))
-        g = int(139 + (200 - 139) * (ratio * 2))
-        b = 34
-    else:
-        r2 = (ratio - 0.5) * 2
-        r = int(255 - (255 - 220) * r2)
-        g = int(200 - 180 * r2)
-        b = int(34 - 30 * r2)
-    return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+    return duration_color(travel_min, max_min)
 
 
 def _draw_infra_path(m, path, stop_lookup, gtfs_to_infra, infra_index, infra_graph,
@@ -315,8 +301,4 @@ elif view_mode == "Regions":
 
     st.dataframe(region_agg, use_container_width=True)
 
-# Footer
-st.markdown(
-    '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
-    unsafe_allow_html=True,
-)
+render_footer()

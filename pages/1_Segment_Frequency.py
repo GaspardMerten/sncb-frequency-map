@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
+from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data, render_footer
 from logic.geo import build_region_geojson
 from logic.gtfs import compute_station_frequencies
 from logic.matching import (
@@ -35,20 +35,20 @@ cluster_map = data.get("cluster_map")
 
 @st.cache_data(show_spinner="Mapping to infrastructure...", ttl=3600)
 def _cached_segments(_seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra,
-                     _prov_geo, _cluster_map):
+                     _prov_geo, _cluster_map, _served_stations):
     segments, stats = map_frequencies_to_infra(
         _seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo,
         cluster_map=_cluster_map,
     )
     segments = [s for s in segments if s["frequency"] > 0]
-    station_freqs = compute_station_frequencies(_seg_freqs)
+    station_freqs = compute_station_frequencies(_seg_freqs, _served_stations)
     segments_merged = mergure_segments(segments, buffer_km=0.5)
     return segments, segments_merged, station_freqs, stats
 
 segments, segments_merged, station_freqs, mapping_stats = _cached_segments(
     segment_freqs, data["stop_lookup"],
     data["infrabel_segs"], data["gtfs_to_infra"], data["prov_geo"],
-    cluster_map,
+    cluster_map, data.get("served_stations"),
 )
 
 if not segments:
@@ -173,8 +173,4 @@ elif view_mode == "Regions":
         st_folium(m, use_container_width=True, height=700, key="region_map")
     st.dataframe(region_stats, use_container_width=True)
 
-# Footer
-st.markdown(
-    '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
-    unsafe_allow_html=True,
-)
+render_footer()

@@ -27,6 +27,9 @@ def build_timetable_graph(feed: gk.Feed, service_ids: set[str],
                            hour_filter: tuple | None = None) -> dict:
     """Build a timetable graph from GTFS data.
 
+    Only includes stops where the train actually stops for passengers
+    (excludes pass-throughs where pickup_type=1 AND drop_off_type=1).
+
     Returns:
         station_departures: dict station_id -> sorted list of (dep_min, arr_station, arr_min, trip_id)
     """
@@ -34,12 +37,15 @@ def build_timetable_graph(feed: gk.Feed, service_ids: set[str],
     stop_times = feed.stop_times
     stops = feed.stops
 
-    from .gtfs import _build_stop_to_station
+    from .gtfs import _build_stop_to_station, _is_pass_through
     stop_to_station = _build_stop_to_station(stops)
 
     active_trip_ids = set(trips.loc[trips["service_id"].isin(service_ids), "trip_id"])
     st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()
     st_f = st_f.sort_values(["trip_id", "stop_sequence"])
+
+    # Remove pass-through stops: passengers can't board or alight there
+    st_f = st_f[~_is_pass_through(st_f)]
 
     st_f["dep_min"] = _vectorized_time_to_minutes(st_f["departure_time"])
     st_f["arr_min"] = _vectorized_time_to_minutes(st_f["arrival_time"])
@@ -354,6 +360,24 @@ def _path_distance_km(path: list[str], stop_lookup: dict) -> float:
     return total
 
 
+def _station_row(sid: str, stop_lookup: dict, prov_geo: dict, **extra) -> dict | None:
+    """Build a common station row dict with geographic info. Returns None if station unknown."""
+    info = stop_lookup.get(sid)
+    if not info:
+        return None
+    province = get_province(info["lat"], info["lon"], prov_geo)
+    region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
+    return {
+        "station_id": sid,
+        "station_name": info["name"],
+        "lat": info["lat"],
+        "lon": info["lon"],
+        "province": province or "Unknown",
+        "region": region,
+        **extra,
+    }
+
+
 def compute_all_reachability(station_ids: list[str], station_departures: dict,
                               max_hours: float, stop_lookup: dict,
                               prov_geo: dict,
@@ -372,10 +396,6 @@ def compute_all_reachability(station_ids: list[str], station_departures: dict,
     total = len(station_ids)
 
     for idx, sid in enumerate(station_ids):
-        info = stop_lookup.get(sid)
-        if not info:
-            continue
-
         reachable = compute_reachability_single(
             sid, station_departures, max_minutes,
             max_transfers=max_transfers,
@@ -384,23 +404,16 @@ def compute_all_reachability(station_ids: list[str], station_departures: dict,
         )
 
         n_reachable = len(reachable)
-        avg_time = 0.0
-        if reachable:
-            avg_time = sum(r["travel_time"] for r in reachable.values()) / n_reachable
+        avg_time = (sum(r["travel_time"] for r in reachable.values()) / n_reachable
+                    if reachable else 0.0)
 
-        province = get_province(info["lat"], info["lon"], prov_geo)
-        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
-
-        rows.append({
-            "station_id": sid,
-            "station_name": info["name"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "reachable_count": n_reachable,
-            "avg_travel_time": round(avg_time, 1),
-            "province": province or "Unknown",
-            "region": region,
-        })
+        row = _station_row(
+            sid, stop_lookup, prov_geo,
+            reachable_count=n_reachable,
+            avg_travel_time=round(avg_time, 1),
+        )
+        if row:
+            rows.append(row)
 
         if progress_callback and idx % 10 == 0:
             progress_callback((idx + 1) / total)
@@ -425,6 +438,18 @@ def compute_direct_frequency(station_id: str, station_departures: dict) -> float
     return count / 16.0
 
 
+# Station size thresholds (trains/hour)
+_SIZE_THRESHOLDS = [(4, "Small"), (10, "Medium")]
+
+
+def station_size(freq_per_hour: float) -> str:
+    """Classify a station as Small / Medium / Big based on direct trains/hour."""
+    for threshold, label in _SIZE_THRESHOLDS:
+        if freq_per_hour < threshold:
+            return label
+    return "Big"
+
+
 def compute_connectivity_metrics(station_ids: list[str],
                                   station_departures: dict,
                                   stop_lookup: dict,
@@ -444,10 +469,6 @@ def compute_connectivity_metrics(station_ids: list[str],
     total = len(station_ids)
 
     for idx, sid in enumerate(station_ids):
-        info = stop_lookup.get(sid)
-        if not info:
-            continue
-
         reachable = compute_reachability_single(
             sid, station_departures, max_minutes,
             stop_lookup=stop_lookup,
@@ -458,26 +479,18 @@ def compute_connectivity_metrics(station_ids: list[str],
 
         a_count = len(reachable)
         b_freq = compute_direct_frequency(sid, station_departures)
-        c_dist = 0.0
-        if reachable:
-            distances = [r["distance_km"] for r in reachable.values() if r.get("distance_km")]
-            if distances:
-                c_dist = sum(distances) / len(distances)
+        distances = [r["distance_km"] for r in reachable.values() if r.get("distance_km")]
+        c_dist = sum(distances) / len(distances) if distances else 0.0
 
-        province = get_province(info["lat"], info["lon"], prov_geo)
-        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
-
-        rows.append({
-            "station_id": sid,
-            "station_name": info["name"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "A_reachable": a_count,
-            "B_direct_freq": round(b_freq, 2),
-            "C_avg_distance_km": round(c_dist, 1),
-            "province": province or "Unknown",
-            "region": region,
-        })
+        row = _station_row(
+            sid, stop_lookup, prov_geo,
+            A_reachable=a_count,
+            B_direct_freq=round(b_freq, 2),
+            C_avg_distance_km=round(c_dist, 1),
+            station_size=station_size(b_freq),
+        )
+        if row:
+            rows.append(row)
 
         if progress_callback and idx % 10 == 0:
             progress_callback((idx + 1) / total)

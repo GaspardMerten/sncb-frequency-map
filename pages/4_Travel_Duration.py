@@ -5,15 +5,14 @@ Supports multiple destinations: one map per destination + an average map.
 """
 
 import pandas as pd
-import numpy as np
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
 
-from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data
+from logic.shared import CUSTOM_CSS, render_sidebar_filters, load_all_data, render_footer
 from logic.geo import build_region_geojson, get_province, PROVINCE_TO_REGION
 from logic.reachability import compute_reachability_single, compute_reachability_to_dest
-from logic.rendering import make_step_colormap, render_reach_choropleth
+from logic.rendering import make_step_colormap, render_reach_choropleth, duration_color
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -44,9 +43,11 @@ stop_lookup = data["stop_lookup"]
 
 # ── Destination selector (multi) ─────────────────────────────────────────────
 
-station_names_sorted = sorted(stop_lookup.items(), key=lambda x: x[1]["name"])
-name_to_id = {info["name"]: sid for sid, info in stop_lookup.items()}
-station_name_list = [info["name"] for _, info in station_names_sorted]
+name_to_id: dict[str, str] = {}
+for sid, info in stop_lookup.items():
+    if info["name"] not in name_to_id:
+        name_to_id[info["name"]] = sid
+station_name_list = sorted(name_to_id.keys())
 
 # Find default (Bruxelles-Central)
 default_names = []
@@ -104,6 +105,17 @@ for dest_id in destination_ids:
         )
 
 
+def _station_base(sid, info):
+    """Build common station fields for duration DataFrames."""
+    province = get_province(info["lat"], info["lon"], data["prov_geo"])
+    region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
+    return {
+        "station_id": sid, "station_name": info["name"],
+        "lat": info["lat"], "lon": info["lon"],
+        "province": province or "Unknown", "region": region,
+    }
+
+
 def _build_duration_df(reachable, dest_id):
     """Build DataFrame for one destination."""
     rows = []
@@ -115,15 +127,7 @@ def _build_duration_df(reachable, dest_id):
             tr = reachable[sid]["transfers"]
         else:
             tt, tr = None, None
-
-        province = get_province(info["lat"], info["lon"], data["prov_geo"])
-        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
-        rows.append({
-            "station_id": sid, "station_name": info["name"],
-            "lat": info["lat"], "lon": info["lon"],
-            "travel_time": tt, "transfers": tr,
-            "province": province or "Unknown", "region": region,
-        })
+        rows.append({**_station_base(sid, info), "travel_time": tt, "transfers": tr})
     return pd.DataFrame(rows)
 
 
@@ -141,39 +145,13 @@ def _build_average_df():
                 times.append(all_reachable[dest_id][sid]["travel_time"])
                 transfers_list.append(all_reachable[dest_id][sid]["transfers"])
 
-        if times:
-            avg_time = sum(times) / len(times)
-            avg_transfers = sum(transfers_list) / len(transfers_list)
-        else:
-            avg_time = None
-            avg_transfers = None
-
-        province = get_province(info["lat"], info["lon"], data["prov_geo"])
-        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
-        rows.append({
-            "station_id": sid, "station_name": info["name"],
-            "lat": info["lat"], "lon": info["lon"],
-            "travel_time": avg_time, "transfers": avg_transfers,
-            "province": province or "Unknown", "region": region,
-        })
+        avg_time = sum(times) / len(times) if times else None
+        avg_transfers = sum(transfers_list) / len(transfers_list) if transfers_list else None
+        rows.append({**_station_base(sid, info), "travel_time": avg_time, "transfers": avg_transfers})
     return pd.DataFrame(rows)
 
 
-# ── Color helper ─────────────────────────────────────────────────────────────
-
-def _duration_color(minutes, max_min):
-    ratio = min(minutes / max(max_min, 1), 1.0)
-    if ratio < 0.5:
-        r2 = ratio * 2
-        r = int(34 + (255 - 34) * r2)
-        g = int(180 - 40 * r2)
-        b = int(34 - 30 * r2)
-    else:
-        r2 = (ratio - 0.5) * 2
-        r = int(255 - 35 * r2)
-        g = int(140 - 120 * r2)
-        b = int(4 + 30 * r2)
-    return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+# ── Station map rendering ────────────────────────────────────────────────────
 
 
 def _render_station_map(df, dest_name, max_time, key_suffix):
@@ -195,7 +173,7 @@ def _render_station_map(df, dest_name, max_time, key_suffix):
         t = row["travel_time"]
         ratio = t / max_time if max_time > 0 else 0
         radius = 4 + 10 * (1 - ratio)
-        color = _duration_color(t, max_time)
+        color = duration_color(t, max_time)
 
         is_dest = (dest_name and row["station_name"] == dest_name)
         if is_dest:
@@ -325,8 +303,4 @@ for dest_name, dest_id in zip(destination_names, destination_ids):
         st.dataframe(display.sort_values("Travel Time (min)").reset_index(drop=True),
                      use_container_width=True, height=300)
 
-# Footer
-st.markdown(
-    '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
-    unsafe_allow_html=True,
-)
+render_footer()

@@ -89,7 +89,7 @@ def render_segment_map(segments, colormap, min_f, max_f,
             drawn.add(station_id)
             ratio = (freq - min_sf) / sf_spread
             radius = 3 + 6 * ratio
-            color = _ratio_to_color(ratio)
+            color = ratio_to_blue(ratio)
             folium.CircleMarker(
                 location=[info["lat"], info["lon"]],
                 radius=radius, color=color, fill=True, fill_color=color,
@@ -116,12 +116,28 @@ def render_segment_map(segments, colormap, min_f, max_f,
     return m
 
 
-def _ratio_to_color(ratio: float) -> str:
-    """Map a 0-1 ratio to a vivid blue gradient."""
+def ratio_to_blue(ratio: float) -> str:
+    """Map a 0-1 ratio to a vivid blue gradient (light -> dark)."""
     r = int(107 + (4 - 107) * ratio)
     g = int(174 + (47 - 174) * ratio)
     b = int(214 + (107 - 214) * ratio)
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def duration_color(minutes: float, max_minutes: float) -> str:
+    """Map travel time to a green -> yellow -> red gradient."""
+    ratio = min(minutes / max(max_minutes, 1), 1.0)
+    if ratio < 0.5:
+        r2 = ratio * 2
+        r = int(34 + (255 - 34) * r2)
+        g = int(180 - 40 * r2)
+        b = int(34 - 30 * r2)
+    else:
+        r2 = (ratio - 0.5) * 2
+        r = int(255 - 35 * r2)
+        g = int(140 - 120 * r2)
+        b = int(4 + 30 * r2)
+    return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
 
 
 def render_choropleth(geo_features, totals, colormap, segments, name_key, tooltip_fn):

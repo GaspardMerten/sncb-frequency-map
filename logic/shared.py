@@ -1,4 +1,4 @@
-"""Shared state and data loading used across all pages."""
+"""Shared state, data loading, and UI helpers used across all pages."""
 
 import os
 import json
@@ -11,7 +11,10 @@ from .api import fetch_gtfs, fetch_infrabel_segments, fetch_operational_points
 from .holidays import (
     public_holidays_in_range, school_holidays_in_range, SCHOOL_HOLIDAYS,
 )
-from .gtfs import get_service_day_counts, build_stop_lookup, compute_segment_frequencies
+from .gtfs import (
+    get_service_day_counts, build_stop_lookup, compute_segment_frequencies,
+    compute_served_stations,
+)
 from .reachability import build_timetable_graph, build_reverse_timetable_graph
 from .matching import build_gtfs_to_infra_mapping, build_infra_cluster_map
 
@@ -69,6 +72,14 @@ CUSTOM_CSS = """
     }
 </style>
 """
+
+
+def render_footer():
+    """Render the standard page footer."""
+    st.markdown(
+        '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_data(ttl=86400)
@@ -232,30 +243,68 @@ def _load_all_data_inner(filters: dict):
     day_count = filters["day_count"]
 
     prov_geo = load_provinces_geojson()
-
     months = _month_ranges(filters["start_date"], filters["end_date"])
     active_months = [
         (ts, ms, me) for ts, ms, me in months
         if any(ms <= d <= me for d in all_dates)
     ]
-    n_months = len(active_months)
 
-    accumulated_seg_freqs: dict[tuple[str, str], float] = defaultdict(float)
-    accumulated_departures: dict[str, list] = defaultdict(list)
+    # ── Accumulate GTFS data across months ───────────────────────────────
+    gtfs = _accumulate_gtfs(active_months, all_dates, filters, token)
+    if not gtfs["service_ids"]:
+        st.error("No active services found across any month.")
+        st.stop()
+
+    # Sort departures and build reverse graph
+    for sid in gtfs["departures"]:
+        gtfs["departures"][sid].sort(key=lambda x: x[0])
+    station_departures = dict(gtfs["departures"])
+    reverse_departures = build_reverse_timetable_graph(station_departures)
+    segment_freqs = {k: v / max(day_count, 1) for k, v in gtfs["seg_freqs"].items()}
+
+    # ── Fetch Infrabel infrastructure ────────────────────────────────────
+    first_ts = months[0][0] if months else int(
+        datetime(filters["start_date"].year, filters["start_date"].month, 1).timestamp()
+    )
+    infrabel_segs = _safe_fetch(fetch_infrabel_segments, first_ts, token)
+    op_points = _safe_fetch(fetch_operational_points, first_ts, token)
+
+    cluster_map = build_infra_cluster_map(op_points, infrabel_segs, radius_km=1.0)
+    gtfs_to_infra = build_gtfs_to_infra_mapping(
+        gtfs["stop_lookup"], op_points, buffer_km=1.0, infrabel_segs=infrabel_segs,
+    )
+
+    return {
+        "segment_freqs": dict(segment_freqs),
+        "station_departures": station_departures,
+        "reverse_departures": reverse_departures,
+        "infrabel_segs": infrabel_segs,
+        "op_points": op_points,
+        "prov_geo": prov_geo,
+        "service_ids": gtfs["service_ids"],
+        "service_day_counts": dict(gtfs["service_day_counts"]),
+        "stop_lookup": gtfs["stop_lookup"],
+        "served_stations": gtfs["served_stations"],
+        "gtfs_to_infra": gtfs_to_infra,
+        "cluster_map": cluster_map,
+    }
+
+
+def _accumulate_gtfs(active_months, all_dates, filters, token):
+    """Fetch and accumulate GTFS data across all active months."""
+    seg_freqs: dict[tuple[str, str], float] = defaultdict(float)
+    departures: dict[str, list] = defaultdict(list)
     stop_lookup: dict = {}
-    all_service_ids: set[str] = set()
-    all_service_day_counts: dict[str, int] = defaultdict(int)
+    service_ids: set[str] = set()
+    service_day_counts: dict[str, int] = defaultdict(int)
+    served_stations: set[str] = set()
 
-    first_ts = months[0][0] if months else int(datetime(filters["start_date"].year, filters["start_date"].month, 1).timestamp())
-
+    n_months = len(active_months)
     progress = st.progress(0, text="Loading GTFS data...")
 
     for i, (ts, month_start, month_end) in enumerate(active_months):
         month_label = month_start.strftime("%b %Y")
-        progress.progress(
-            (i) / max(n_months, 1),
-            text=f"Processing {month_label} ({i+1}/{n_months})...",
-        )
+        progress.progress(i / max(n_months, 1), text=f"Processing {month_label} ({i+1}/{n_months})...")
 
         month_dates = [d for d in all_dates if month_start <= d <= month_end]
         if not month_dates:
@@ -276,70 +325,39 @@ def _load_all_data_inner(filters: dict):
         if not sids:
             continue
 
-        month_lookup = build_stop_lookup(feed)
-        stop_lookup.update(month_lookup)
+        stop_lookup.update(build_stop_lookup(feed))
+        served_stations |= compute_served_stations(feed, sids, filters["hour_filter"])
 
-        month_freqs = compute_segment_frequencies(
-            feed, sids, filters["hour_filter"],
-            day_count=1,
-            service_day_counts=sdc,
-        )
-        for k, v in month_freqs.items():
-            accumulated_seg_freqs[k] += v
+        for k, v in compute_segment_frequencies(
+            feed, sids, filters["hour_filter"], day_count=1, service_day_counts=sdc,
+        ).items():
+            seg_freqs[k] += v
 
-        month_deps = build_timetable_graph(feed, sids, filters["hour_filter"])
-        for station, deps in month_deps.items():
-            accumulated_departures[station].extend(deps)
+        for station, deps in build_timetable_graph(feed, sids, filters["hour_filter"]).items():
+            departures[station].extend(deps)
 
         for sid, cnt in sdc.items():
-            all_service_day_counts[sid] += cnt
-        all_service_ids |= sids
+            service_day_counts[sid] += cnt
+        service_ids |= sids
 
         del feed
 
     progress.progress(1.0, text="Finalizing...")
-
-    if not all_service_ids:
-        progress.empty()
-        st.error("No active services found across any month.")
-        st.stop()
-
-    for sid in accumulated_departures:
-        accumulated_departures[sid].sort(key=lambda x: x[0])
-
-    station_departures = dict(accumulated_departures)
-    reverse_departures = build_reverse_timetable_graph(station_departures)
-
-    segment_freqs = {k: v / max(day_count, 1) for k, v in accumulated_seg_freqs.items()}
-
-    try:
-        infrabel_segs = fetch_infrabel_segments(first_ts, token)
-    except Exception:
-        infrabel_segs = None
-    try:
-        op_points = fetch_operational_points(first_ts, token)
-    except Exception:
-        op_points = None
-
-    # Cluster Infrabel stations within 1km to handle isolated points
-    cluster_map = build_infra_cluster_map(op_points, infrabel_segs, radius_km=1.0)
-
-    gtfs_to_infra = build_gtfs_to_infra_mapping(
-        stop_lookup, op_points, buffer_km=1.0, infrabel_segs=infrabel_segs,
-    )
-
     progress.empty()
 
     return {
-        "segment_freqs": dict(segment_freqs),
-        "station_departures": station_departures,
-        "reverse_departures": reverse_departures,
-        "infrabel_segs": infrabel_segs,
-        "op_points": op_points,
-        "prov_geo": prov_geo,
-        "service_ids": all_service_ids,
-        "service_day_counts": dict(all_service_day_counts),
+        "seg_freqs": seg_freqs,
+        "departures": departures,
         "stop_lookup": stop_lookup,
-        "gtfs_to_infra": gtfs_to_infra,
-        "cluster_map": cluster_map,
+        "service_ids": service_ids,
+        "service_day_counts": service_day_counts,
+        "served_stations": served_stations,
     }
+
+
+def _safe_fetch(fn, *args):
+    """Call fn(*args), returning None on failure."""
+    try:
+        return fn(*args)
+    except Exception:
+        return None

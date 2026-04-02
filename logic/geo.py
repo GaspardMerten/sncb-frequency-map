@@ -3,7 +3,7 @@
 import math
 import numpy as np
 from shapely.geometry import Point, LineString, MultiPolygon, shape
-from shapely.ops import nearest_points, split, substring
+from shapely.ops import substring
 from shapely import prepared
 
 # Belgium bounding box

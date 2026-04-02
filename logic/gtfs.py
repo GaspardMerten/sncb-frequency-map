@@ -54,6 +54,22 @@ def _build_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
     return dict(zip(sid, station))
 
 
+def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
+    """Return boolean Series: True where the stop is a pass-through (no boarding/alighting).
+
+    GTFS pickup_type=1 means no pickup, drop_off_type=1 means no drop-off.
+    A stop is pass-through when BOTH are 1 (train doesn't stop for passengers).
+    Missing columns or NaN values are treated as 0 (regular stop).
+    """
+    pickup = pd.to_numeric(
+        st_df["pickup_type"], errors="coerce"
+    ).fillna(0).astype(int) if "pickup_type" in st_df.columns else 0
+    dropoff = pd.to_numeric(
+        st_df["drop_off_type"], errors="coerce"
+    ).fillna(0).astype(int) if "drop_off_type" in st_df.columns else 0
+    return (pickup == 1) & (dropoff == 1)
+
+
 def build_stop_lookup(feed: gk.Feed) -> dict:
     """Build lookup: station_id -> {name, lat, lon}, grouping by parent_station."""
     stops = feed.stops
@@ -79,7 +95,11 @@ def compute_segment_frequencies(feed: gk.Feed, service_ids: set[str],
                                  day_count: int = 1,
                                  service_day_counts: dict[str, int] | None = None,
                                  ) -> dict[tuple[str, str], float]:
-    """Compute average daily frequency per consecutive stop pair (vectorized)."""
+    """Compute average daily frequency per consecutive stop pair (vectorized).
+
+    Uses ALL stops (including pass-throughs) to build segment edges,
+    since the train physically runs on those tracks.
+    """
     trips = feed.trips
     stop_times = feed.stop_times
     stops = feed.stops
@@ -133,10 +153,46 @@ def compute_segment_frequencies(feed: gk.Feed, service_ids: set[str],
     return {(a, b): v / divisor for (a, b), v in result.items() if v > 0}
 
 
-def compute_station_frequencies(segment_freqs: dict[tuple[str, str], float]) -> dict[str, float]:
-    """Sum segment frequencies touching each station."""
+def compute_station_frequencies(segment_freqs: dict[tuple[str, str], float],
+                                 served_stations: set[str] | None = None,
+                                 ) -> dict[str, float]:
+    """Sum segment frequencies touching each station.
+
+    If served_stations is provided, only count stations in that set
+    (excludes pass-through stations where trains don't stop).
+    """
     station_freq = defaultdict(float)
     for (a, b), freq in segment_freqs.items():
-        station_freq[a] += freq
-        station_freq[b] += freq
+        if served_stations is None or a in served_stations:
+            station_freq[a] += freq
+        if served_stations is None or b in served_stations:
+            station_freq[b] += freq
     return dict(station_freq)
+
+
+def compute_served_stations(feed: gk.Feed, service_ids: set[str],
+                            hour_filter: tuple | None = None,
+                            ) -> set[str]:
+    """Return station IDs where at least one train actually stops (not pass-through).
+
+    A stop is considered served if pickup_type != 1 OR drop_off_type != 1.
+    """
+    stop_times = feed.stop_times
+    stops = feed.stops
+    trips = feed.trips
+
+    stop_to_station = _build_stop_to_station(stops)
+
+    active_trip_ids = set(trips.loc[trips["service_id"].isin(service_ids), "trip_id"])
+    st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()
+
+    # Filter out pass-through stops
+    st_f = st_f[~_is_pass_through(st_f)]
+
+    if hour_filter:
+        st_f["hour"] = st_f["departure_time"].str.split(":").str[0]
+        st_f["hour"] = pd.to_numeric(st_f["hour"], errors="coerce").fillna(-1).astype(int)
+        st_f = st_f[(st_f["hour"] >= hour_filter[0]) & (st_f["hour"] < hour_filter[1])]
+
+    st_f["station_id"] = st_f["stop_id"].map(stop_to_station).fillna(st_f["stop_id"])
+    return set(st_f["station_id"].unique())
