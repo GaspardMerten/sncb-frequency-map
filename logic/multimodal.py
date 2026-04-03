@@ -10,9 +10,10 @@ import bisect
 import heapq
 import numpy as np
 import pandas as pd
-import gtfs_kit as gk
 from collections import defaultdict
 from datetime import date
+
+from .gtfs import _to_datetime_safe
 
 from .geo import haversine_km, is_in_belgium
 
@@ -34,7 +35,7 @@ def _walk_minutes(dist_km: float) -> float:
 # Multi-operator stop lookup
 # ---------------------------------------------------------------------------
 
-def build_multimodal_stop_lookup(feeds: dict[str, gk.Feed]) -> dict[str, dict]:
+def build_multimodal_stop_lookup(feeds: dict) -> dict[str, dict]:
     """Build a unified stop lookup across all operators.
 
     Keys are prefixed: "SNCB:stop_id", "STIB:stop_id", etc.
@@ -73,7 +74,9 @@ def build_multimodal_stop_lookup(feeds: dict[str, gk.Feed]) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 def _vectorized_time_to_minutes(series: pd.Series) -> np.ndarray:
-    parts = series.str.split(":", n=2, expand=True)
+    if pd.api.types.is_timedelta64_dtype(series):
+        return (series.dt.total_seconds() / 60).fillna(-1).astype(int).values
+    parts = series.astype(str).str.split(":", n=2, expand=True)
     hours = pd.to_numeric(parts[0], errors="coerce").fillna(-1)
     minutes = pd.to_numeric(parts[1], errors="coerce").fillna(0)
     return (hours * 60 + minutes).astype(int).values
@@ -99,7 +102,7 @@ def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
     return (pickup == 1) & (dropoff == 1)
 
 
-def get_active_service_ids(feed: gk.Feed, target_dates: list[date]) -> set[str]:
+def get_active_service_ids(feed, target_dates: list[date]) -> set[str]:
     """Determine active service_ids for the given dates."""
     day_names = ["monday", "tuesday", "wednesday", "thursday", "friday",
                  "saturday", "sunday"]
@@ -108,8 +111,8 @@ def get_active_service_ids(feed: gk.Feed, target_dates: list[date]) -> set[str]:
 
     if feed.calendar is not None:
         cal = feed.calendar.copy()
-        cal["start_date"] = pd.to_datetime(cal["start_date"], format="%Y%m%d")
-        cal["end_date"] = pd.to_datetime(cal["end_date"], format="%Y%m%d")
+        cal["start_date"] = _to_datetime_safe(cal["start_date"])
+        cal["end_date"] = _to_datetime_safe(cal["end_date"])
         for d in target_dates:
             ts = pd.Timestamp(d)
             mask = (cal["start_date"] <= ts) & (cal["end_date"] >= ts)
@@ -120,7 +123,7 @@ def get_active_service_ids(feed: gk.Feed, target_dates: list[date]) -> set[str]:
 
     if feed.calendar_dates is not None:
         cd = feed.calendar_dates.copy()
-        cd["date"] = pd.to_datetime(cd["date"], format="%Y%m%d")
+        cd["date"] = _to_datetime_safe(cd["date"])
         cd = cd[cd["date"].isin(ts_dates)]
         for sid in cd[cd["exception_type"] == 1]["service_id"]:
             counts[sid] += 1
@@ -131,7 +134,7 @@ def get_active_service_ids(feed: gk.Feed, target_dates: list[date]) -> set[str]:
     return set(counts.keys())
 
 
-def build_multimodal_graph(feeds: dict[str, gk.Feed],
+def build_multimodal_graph(feeds: dict,
                            service_ids_per_op: dict[str, set[str]],
                            hour_filter: tuple | None = None,
                            ) -> dict[str, list]:
@@ -185,18 +188,17 @@ def build_multimodal_graph(feeds: dict[str, gk.Feed],
                 (pairs["dep_min"] < h_end * 60)
             ]
 
-        # Prefix station IDs with operator
+        # Prefix station IDs with operator — fully vectorized
         prefix = f"{operator}:"
-        for i in range(len(pairs)):
-            row = pairs.iloc[i]
-            from_id = prefix + str(row["station_id"])
-            to_id = prefix + str(row["next_station"])
-            trip_id = prefix + str(row["trip_id"])
-            all_departures[from_id].append((
-                int(row["dep_min"]),
-                to_id,
-                int(row["next_arr_min"]),
-                trip_id,
+        from_ids = (prefix + pairs["station_id"].astype(str)).values
+        to_ids = (prefix + pairs["next_station"].astype(str)).values
+        trip_ids = (prefix + pairs["trip_id"].astype(str)).values
+        dep_vals = pairs["dep_min"].values.astype(int)
+        arr_vals = pairs["next_arr_min"].values.astype(int)
+
+        for k in range(len(from_ids)):
+            all_departures[from_ids[k]].append((
+                dep_vals[k], to_ids[k], arr_vals[k], trip_ids[k],
             ))
 
     # Sort by departure time
@@ -213,15 +215,14 @@ def build_multimodal_graph(feeds: dict[str, gk.Feed],
 def build_transfer_edges(stop_lookup: dict[str, dict],
                          max_walk_km: float = 0.4,
                          ) -> dict[str, list[tuple[str, float]]]:
-    """Build walking transfer edges between stops of different operators.
+    """Build walking transfer edges between nearby stops.
 
     Returns: dict stop_id -> [(other_stop_id, walk_minutes), ...]
-    Only connects stops from different operators within max_walk_km.
+    Connects stops within max_walk_km, both inter- and intra-operator
+    (different station IDs only).
     """
-    # Group stops by operator
     ids = list(stop_lookup.keys())
     coords = np.array([(stop_lookup[s]["lat"], stop_lookup[s]["lon"]) for s in ids])
-    operators = [stop_lookup[s]["operator"] for s in ids]
 
     transfers: dict[str, list[tuple[str, float]]] = defaultdict(list)
 
@@ -244,7 +245,9 @@ def build_transfer_edges(stop_lookup: dict[str, dict],
             for j in neighbours:
                 if i >= j:
                     continue
-                if operators[i] == operators[j]:
+                # Skip self-links (same prefixed ID is impossible, but same
+                # underlying station within one operator is redundant)
+                if ids[i] == ids[j]:
                     continue
                 dist = haversine_km(
                     coords[i, 0], coords[i, 1],
@@ -284,11 +287,10 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
                    transfer_penalty_min: int = 3,
                    max_walk_km: float = MAX_WALK_KM,
                    ) -> dict[str, dict]:
-    """Door-to-door BFS from a geographic point.
+    """Door-to-door Dijkstra from a geographic point.
 
-    1. Walk from origin to all nearby stops (first mile).
-    2. Ride transit using the timetable graph.
-    3. Result includes walking time + transit time for each reachable stop.
+    Tries departures every 5 minutes within the window, keeps the best
+    travel time to each stop across all departure times.
 
     Returns: stop_id -> {travel_time, transfers, walk_time, transit_time}
     """
@@ -302,14 +304,13 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
 
     best_results: dict[str, dict] = {}
 
-    for start_hour in range(departure_window[0], departure_window[1]):
-        base_time = start_hour * 60
+    # Try every 5 minutes in the departure window
+    start_min = departure_window[0] * 60
+    end_min = departure_window[1] * 60
+    for base_time in range(start_min, end_min, 5):
         deadline = base_time + max_minutes
 
-        # best_arrival[stop] = earliest arrival time
         best_arrival: dict[str, float] = {}
-
-        # Priority queue: (arrival_time, stop_id, n_transfers, trip_id, walk_min)
         queue: list = []
 
         # Seed: walk from origin to nearby stops
@@ -383,7 +384,7 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
                         arr_min, next_stop, new_transfers, trip_id, walk_accum,
                     ))
 
-            # Explore walking transfers to stops of other operators
+            # Explore walking transfers
             for other_stop, walk_min in transfer_edges.get(current_stop, []):
                 arr_walk = current_time + walk_min
                 if arr_walk > deadline:
@@ -398,6 +399,27 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
     return best_results
 
 
+def _build_reverse_graph(station_departures: dict[str, list],
+                         ) -> dict[str, list]:
+    """Build a reverse timetable graph for backward Dijkstra.
+
+    Original: from_stop -> [(dep_min, to_stop, arr_min, trip_id), ...]
+    Reverse:  to_stop   -> [(arr_min, from_stop, dep_min, trip_id), ...]
+
+    Sorted by arr_min descending (latest first) for backward search.
+    """
+    reverse: dict[str, list] = defaultdict(list)
+    for from_stop, deps in station_departures.items():
+        for dep_min, to_stop, arr_min, trip_id in deps:
+            reverse[to_stop].append((arr_min, from_stop, dep_min, trip_id))
+
+    # Sort by arrival time descending (we search backward in time)
+    for sid in reverse:
+        reverse[sid].sort(key=lambda x: x[0], reverse=True)
+
+    return dict(reverse)
+
+
 def bfs_to_point(dest_lat: float, dest_lon: float,
                  stop_lookup: dict,
                  station_departures: dict,
@@ -408,38 +430,136 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                  transfer_penalty_min: int = 3,
                  max_walk_km: float = MAX_WALK_KM,
                  ) -> dict[str, dict]:
-    """Door-to-door BFS *to* a destination point.
+    """Door-to-door reverse Dijkstra *to* a destination point.
 
-    Finds, for each stop, the total time to reach the destination (transit
-    to a nearby stop + walk the last mile).
+    Runs backward from the destination: starts at stops near the destination,
+    then follows the timetable graph in reverse (arrivals → departures) to
+    find the latest possible departure from each origin stop that still
+    arrives in time.
 
-    Approach: run bfs_from_point from the destination (reverse is computationally
-    expensive), then for each result add last-mile walking to the destination.
-    This is an approximation — treat destination-nearby-stops as the arrival
-    points and add last-mile cost.
+    Returns: stop_id -> {travel_time, transfers, walk_time, transit_time}
     """
-    # Find stops near the destination
     nearby_dest = find_nearby_stops(dest_lat, dest_lon, stop_lookup, max_walk_km)
     if not nearby_dest:
         return {}
 
-    # For "to destination" mode, we run forward BFS from each origin stop
-    # but that's O(n_stops) BFS. Instead, we compute from the destination
-    # outward and let the user interpret it as "reachable from everywhere".
-    # This gives a good approximation for display purposes.
+    reverse_graph = _build_reverse_graph(station_departures)
 
-    result = bfs_from_point(
-        dest_lat, dest_lon, stop_lookup, station_departures, transfer_edges,
-        max_minutes, departure_window, max_transfers, transfer_penalty_min,
-        max_walk_km,
-    )
+    # Precompute arrival time lists for bisect (descending order)
+    arr_times = {sid: [e[0] for e in edges]
+                 for sid, edges in reverse_graph.items()}
 
-    # For each reachable stop, also record walking from that stop to the
-    # destination as "last mile" perspective
-    for stop_id in list(result.keys()):
-        info = stop_lookup.get(stop_id)
-        if info:
-            last_km = haversine_km(info["lat"], info["lon"], dest_lat, dest_lon)
-            result[stop_id]["last_mile_km"] = last_km
+    best_results: dict[str, dict] = {}
 
-    return result
+    # Try target arrival times every 5 minutes in the window
+    start_min = departure_window[0] * 60
+    end_min = departure_window[1] * 60
+
+    for target_arrival in range(start_min, end_min, 5):
+        # The traveller must arrive at destination by target_arrival + max_minutes
+        deadline_arrival = target_arrival + max_minutes
+        # Earliest departure we consider
+        earliest_dep = target_arrival
+
+        # latest_departure[stop] = latest time you can depart from stop and
+        # still reach the destination by deadline_arrival
+        latest_departure: dict[str, float] = {}
+
+        # Max-heap (negate time): (-departure_time, stop_id, n_transfers, trip_id, walk_accum)
+        queue: list = []
+
+        # Seed: walk from destination-nearby stops to destination
+        for stop_id, walk_min in nearby_dest:
+            # You need to arrive at this stop by deadline_arrival - walk_min
+            depart_by = deadline_arrival - walk_min
+            if depart_by < earliest_dep:
+                continue
+            if stop_id not in latest_departure or depart_by > latest_departure[stop_id]:
+                latest_departure[stop_id] = depart_by
+                heapq.heappush(queue, (-depart_by, stop_id, 0, None, walk_min))
+
+        while queue:
+            neg_time, current_stop, n_transfers, current_trip, walk_accum = \
+                heapq.heappop(queue)
+            current_time = -neg_time  # latest time to depart from current_stop
+
+            if current_time < latest_departure.get(current_stop, -1):
+                continue
+            if current_time < earliest_dep:
+                continue
+            if max_transfers is not None and n_transfers > max_transfers:
+                continue
+
+            # Record result: travel_time = deadline_arrival - current_time
+            total_travel = deadline_arrival - current_time
+            if total_travel > max_minutes:
+                continue
+            if current_stop not in best_results or \
+               total_travel < best_results[current_stop]["travel_time"]:
+                best_results[current_stop] = {
+                    "travel_time": total_travel,
+                    "transfers": n_transfers,
+                    "walk_time": walk_accum,
+                    "transit_time": total_travel - walk_accum,
+                }
+
+            # Explore reverse transit: find arrivals at current_stop where
+            # arr_min <= current_time (i.e. the train arrived before we need
+            # to be here). Then we can "go back" to the departure stop.
+            arrivals = reverse_graph.get(current_stop, [])
+            atimes = arr_times.get(current_stop, [])
+
+            # atimes is sorted descending; find first index where arr <= current_time
+            # binary search: we want largest arr_min <= current_time
+            lo = bisect.bisect_left(atimes, -current_time, key=lambda x: -x)
+
+            seen_prev = set()
+            for idx in range(lo, len(arrivals)):
+                arr_min, from_stop, dep_min, trip_id = arrivals[idx]
+
+                if arr_min > current_time:
+                    continue
+                if dep_min < earliest_dep:
+                    break
+
+                is_same_trip = current_trip is not None and trip_id == current_trip
+
+                if is_same_trip:
+                    new_transfers = n_transfers
+                else:
+                    is_initial = current_trip is None
+                    if not is_initial:
+                        # Transfer: arrival must be at least penalty before current
+                        if arr_min + transfer_penalty_min > current_time:
+                            continue
+                        new_transfers = n_transfers + 1
+                        if max_transfers is not None and \
+                           new_transfers > max_transfers:
+                            continue
+                    else:
+                        new_transfers = n_transfers
+
+                    if from_stop in seen_prev:
+                        continue
+                    seen_prev.add(from_stop)
+
+                # dep_min = the time you'd need to be at from_stop
+                if dep_min > latest_departure.get(from_stop, -1):
+                    latest_departure[from_stop] = dep_min
+                    heapq.heappush(queue, (
+                        -dep_min, from_stop, new_transfers, trip_id, walk_accum,
+                    ))
+
+            # Explore walking transfers (backward)
+            for other_stop, walk_min in transfer_edges.get(current_stop, []):
+                depart_by = current_time - walk_min
+                if depart_by < earliest_dep:
+                    continue
+                if depart_by > latest_departure.get(other_stop, -1):
+                    latest_departure[other_stop] = depart_by
+                    new_walk = walk_accum + walk_min
+                    heapq.heappush(queue, (
+                        -depart_by, other_stop, n_transfers, None, new_walk,
+                    ))
+
+    return best_results

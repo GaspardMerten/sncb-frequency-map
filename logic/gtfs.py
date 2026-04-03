@@ -2,20 +2,35 @@
 
 import pandas as pd
 import numpy as np
-import gtfs_kit as gk
 from collections import defaultdict
 from datetime import date
 
 from .geo import is_in_belgium
 
 
-def get_active_service_ids(feed: gk.Feed, target_dates: list[date]) -> set[str]:
+def _to_datetime_safe(series):
+    """Convert a date column to datetime, handling both string and datetime types."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+    return pd.to_datetime(series, format="%Y%m%d")
+
+
+def _timedelta_to_hours(series: pd.Series) -> pd.Series:
+    """Extract integer hours from a timedelta or string time column."""
+    if pd.api.types.is_timedelta64_dtype(series):
+        return (series.dt.total_seconds() // 3600).fillna(-1).astype(int)
+    return pd.to_numeric(
+        series.astype(str).str.split(":").str[0], errors="coerce"
+    ).fillna(-1).astype(int)
+
+
+def get_active_service_ids(feed, target_dates: list[date]) -> set[str]:
     """Determine which GTFS service_ids are active on any of the target dates."""
     counts = get_service_day_counts(feed, target_dates)
     return set(counts.keys())
 
 
-def get_service_day_counts(feed: gk.Feed, target_dates: list[date]) -> dict[str, int]:
+def get_service_day_counts(feed, target_dates: list[date]) -> dict[str, int]:
     """Count how many target dates each service_id is active on."""
     day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     counts: dict[str, int] = defaultdict(int)
@@ -23,8 +38,8 @@ def get_service_day_counts(feed: gk.Feed, target_dates: list[date]) -> dict[str,
 
     if feed.calendar is not None:
         cal = feed.calendar.copy()
-        cal["start_date"] = pd.to_datetime(cal["start_date"], format="%Y%m%d")
-        cal["end_date"] = pd.to_datetime(cal["end_date"], format="%Y%m%d")
+        cal["start_date"] = _to_datetime_safe(cal["start_date"])
+        cal["end_date"] = _to_datetime_safe(cal["end_date"])
         for d in target_dates:
             ts = pd.Timestamp(d)
             mask = (cal["start_date"] <= ts) & (cal["end_date"] >= ts)
@@ -35,7 +50,7 @@ def get_service_day_counts(feed: gk.Feed, target_dates: list[date]) -> dict[str,
 
     if feed.calendar_dates is not None:
         cd = feed.calendar_dates.copy()
-        cd["date"] = pd.to_datetime(cd["date"], format="%Y%m%d")
+        cd["date"] = _to_datetime_safe(cd["date"])
         cd = cd[cd["date"].isin(ts_dates)]
         for sid in cd[cd["exception_type"] == 1]["service_id"]:
             counts[sid] += 1
@@ -48,7 +63,7 @@ def get_service_day_counts(feed: gk.Feed, target_dates: list[date]) -> dict[str,
 
 def _build_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
     """Build stop_id -> parent_station mapping, vectorized."""
-    sid = stops["stop_id"].str.strip()
+    sid = stops["stop_id"].astype(str).str.strip()
     parent = stops["parent_station"].fillna("").astype(str).str.strip()
     station = np.where(parent != "", parent, sid)
     return dict(zip(sid, station))
@@ -82,7 +97,7 @@ def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
     return (pickup == 1) & (dropoff == 1)
 
 
-def build_stop_lookup(feed: gk.Feed) -> dict:
+def build_stop_lookup(feed) -> dict:
     """Build lookup: station_id -> {name, lat, lon}, grouping by parent_station."""
     stops = feed.stops
     lats = stops["stop_lat"].values.astype(float)
@@ -102,7 +117,7 @@ def build_stop_lookup(feed: gk.Feed) -> dict:
     return lookup
 
 
-def compute_segment_frequencies(feed: gk.Feed, service_ids: set[str],
+def compute_segment_frequencies(feed, service_ids: set[str],
                                  hour_filter: tuple | None = None,
                                  day_count: int = 1,
                                  service_day_counts: dict[str, int] | None = None,
@@ -127,8 +142,7 @@ def compute_segment_frequencies(feed: gk.Feed, service_ids: set[str],
     st_f = st_f.sort_values(["trip_id", "stop_sequence"])
 
     # Vectorized hour parsing
-    st_f["hour"] = st_f["departure_time"].str.split(":").str[0]
-    st_f["hour"] = pd.to_numeric(st_f["hour"], errors="coerce").fillna(-1).astype(int)
+    st_f["hour"] = _timedelta_to_hours(st_f["departure_time"])
 
     # Map to parent stations
     st_f["station_id"] = st_f["stop_id"].map(stop_to_station).fillna(st_f["stop_id"])
@@ -182,7 +196,7 @@ def compute_station_frequencies(segment_freqs: dict[tuple[str, str], float],
     return dict(station_freq)
 
 
-def compute_served_stations(feed: gk.Feed, service_ids: set[str],
+def compute_served_stations(feed, service_ids: set[str],
                             hour_filter: tuple | None = None,
                             ) -> set[str]:
     """Return station IDs where at least one train actually stops (not pass-through).
@@ -202,8 +216,7 @@ def compute_served_stations(feed: gk.Feed, service_ids: set[str],
     st_f = st_f[~_is_pass_through(st_f)]
 
     if hour_filter:
-        st_f["hour"] = st_f["departure_time"].str.split(":").str[0]
-        st_f["hour"] = pd.to_numeric(st_f["hour"], errors="coerce").fillna(-1).astype(int)
+        st_f["hour"] = _timedelta_to_hours(st_f["departure_time"])
         st_f = st_f[(st_f["hour"] >= hour_filter[0]) & (st_f["hour"] < hour_filter[1])]
 
     st_f["station_id"] = st_f["stop_id"].map(stop_to_station).fillna(st_f["stop_id"])

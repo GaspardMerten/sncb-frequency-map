@@ -73,14 +73,18 @@ with st.sidebar:
     departure_window = st.slider("Departure window", 0, 24, (7, 9), step=1)
     transfer_penalty = st.slider("Min transfer time (min)", 0, 15, 3)
     max_transfers = st.slider("Max transfers", 0, 5, 3)
-    max_walk = st.slider("Max walking distance (km)", 0.5, 3.0, 1.5, step=0.5)
+    transfer_dist = st.slider("Transfer stop distance (m)", 100, 1000, 400, step=50,
+                              help="Max distance between stops to allow a walking transfer.")
 
+    mile_label = "First-mile transport" if direction == "From address" else "Last-mile transport"
     if view_mode == "Gradient":
-        mile_label = "Last-mile transport" if direction == "From address" else "First-mile transport"
         transport_mode = st.radio(mile_label, list(TRANSPORT_SPEEDS.keys()),
                                   horizontal=True)
     else:
-        transport_mode = "Walk"
+        transport_mode = st.radio(mile_label, list(TRANSPORT_SPEEDS.keys()),
+                                  horizontal=True, key="mile_mode_non_gradient")
+    max_walk = st.number_input("Max distance (km)", min_value=0.5, max_value=10.0,
+                               value=1.5, step=0.5, format="%.1f")
 
     st.markdown('<hr class="sidebar-divider"/>', unsafe_allow_html=True)
     st.markdown('<p class="sidebar-section">Date</p>', unsafe_allow_html=True)
@@ -133,15 +137,16 @@ target_dates = [target_date]
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _load_multimodal_data(_operators, _ts, _token, _target_dates, _hour_filter):
+def _load_multimodal_data(operators, ts, token, target_dates_, hour_filter,
+                          transfer_dist_km=0.4):
     """Load and merge GTFS feeds from all selected operators."""
     feeds = {}
     sids_per_op = {}
 
     progress_bar = st.progress(0, text="Loading GTFS data…")
-    n_ops = len(_operators)
+    n_ops = len(operators)
 
-    for i, op_name in enumerate(_operators):
+    for i, op_name in enumerate(operators):
         slug = OPERATORS[op_name]
         base_pct = i / n_ops
         step_pct = 1 / n_ops
@@ -158,7 +163,7 @@ def _load_multimodal_data(_operators, _ts, _token, _target_dates, _hour_filter):
             progress_bar.progress(
                 base_pct, text=f"Downloading {op_name}…",
             )
-            feed = fetch_gtfs_operator(slug, _ts, _token, _progress_cb=_on_progress)
+            feed = fetch_gtfs_operator(slug, ts, token, progress_cb=_on_progress)
         except Exception as e:
             st.warning(f"Could not load {op_name}: {e}")
             continue
@@ -172,9 +177,9 @@ def _load_multimodal_data(_operators, _ts, _token, _target_dates, _hour_filter):
             st.warning(f"{op_name} GTFS data incomplete, skipping.")
             continue
 
-        sids = get_active_service_ids(feed, _target_dates)
+        sids = get_active_service_ids(feed, target_dates_)
         if not sids:
-            st.warning(f"No active services for {op_name} on {_target_dates[0]}")
+            st.warning(f"No active services for {op_name} on {target_dates_[0]}")
             continue
 
         feeds[op_name] = feed
@@ -187,9 +192,9 @@ def _load_multimodal_data(_operators, _ts, _token, _target_dates, _hour_filter):
     progress_bar.progress(0.92, text="Building stop lookup…")
     stop_lookup = build_multimodal_stop_lookup(feeds)
     progress_bar.progress(0.95, text="Building timetable graph…")
-    graph = build_multimodal_graph(feeds, sids_per_op, _hour_filter)
+    graph = build_multimodal_graph(feeds, sids_per_op, hour_filter)
     progress_bar.progress(0.98, text="Building transfer edges…")
-    transfers = build_transfer_edges(stop_lookup, max_walk_km=0.4)
+    transfers = build_transfer_edges(stop_lookup, max_walk_km=transfer_dist_km)
     progress_bar.progress(1.0, text="Done!")
     progress_bar.empty()
 
@@ -204,6 +209,7 @@ def _load_multimodal_data(_operators, _ts, _token, _target_dates, _hour_filter):
 data = _load_multimodal_data(
     tuple(selected_operators), ts, token,
     tuple(target_dates), tuple(departure_window),
+    transfer_dist_km=transfer_dist / 1000.0,
 )
 
 if data is None:
@@ -220,20 +226,22 @@ max_minutes = max_hours * 60
 
 
 @st.cache_data(show_spinner="Computing multimodal travel times...", ttl=3600)
-def _compute_travel_times(_lat, _lon, _graph, _transfers, _stop_lookup,
-                          _max_min, _dep_window, _max_transfers,
-                          _transfer_penalty, _max_walk, _direction):
-    if _direction == "From address":
+def _compute_travel_times(lat, lon, _graph, _transfers, _stop_lookup,
+                          max_min, dep_window, max_transfers_,
+                          transfer_penalty, max_walk, direction,
+                          operators_key=(), transfer_dist_key=0.4,
+                          date_key=None):
+    if direction == "From address":
         return bfs_from_point(
-            _lat, _lon, _stop_lookup, _graph, _transfers,
-            _max_min, _dep_window, _max_transfers,
-            _transfer_penalty, _max_walk,
+            lat, lon, _stop_lookup, _graph, _transfers,
+            max_min, dep_window, max_transfers_,
+            transfer_penalty, max_walk,
         )
     else:
         return bfs_to_point(
-            _lat, _lon, _stop_lookup, _graph, _transfers,
-            _max_min, _dep_window, _max_transfers,
-            _transfer_penalty, _max_walk,
+            lat, lon, _stop_lookup, _graph, _transfers,
+            max_min, dep_window, max_transfers_,
+            transfer_penalty, max_walk,
         )
 
 
@@ -242,6 +250,9 @@ reachable = _compute_travel_times(
     graph, transfers, stop_lookup,
     max_minutes, departure_window, max_transfers,
     transfer_penalty, max_walk, direction,
+    operators_key=tuple(selected_operators),
+    transfer_dist_key=transfer_dist,
+    date_key=target_date,
 )
 
 # ── Build results DataFrame ──────────────────────────────────────────────────
@@ -324,7 +335,7 @@ transit stop in Belgium, combining **walking** + **public transit** from multipl
 **Views**
 - *Stations*: circle per stop, colored by travel time (green = fast, red = slow), with operator-coded outline.
 - *Provinces / Regions*: average travel time per area.
-- *Gradient*: continuous heatmap. Total time = transit to nearest stop + last-mile distance at selected speed.
+- *Gradient*: continuous heatmap. Total time = transit to nearest stop + first/last-mile distance at selected speed.
     """)
 
 # Metrics (computed on all operators, not just displayed ones)
@@ -399,7 +410,7 @@ if view_mode == "Stations":
         fill=False, tooltip=f"Walking radius ({max_walk} km)",
     ).add_to(m)
 
-    st_folium(m, use_container_width=True, height=650, key="mm_station_map")
+    st_folium(m, width="stretch", height=650, key="mm_station_map")
 
     # Data table
     with st.expander("Stop data"):
@@ -409,7 +420,7 @@ if view_mode == "Stations":
                            "Transfers", "Province"]
         st.dataframe(
             display.sort_values("Total (min)").reset_index(drop=True),
-            use_container_width=True, height=400,
+            width="stretch", height=400,
         )
 
 elif view_mode == "Provinces":
@@ -433,8 +444,8 @@ elif view_mode == "Provinces":
             icon=folium.Icon(color="red", icon="home", prefix="fa"),
             tooltip="📍 Origin",
         ).add_to(pm)
-        st_folium(pm, use_container_width=True, height=650, key="mm_prov_map")
-    st.dataframe(prov_agg, use_container_width=True)
+        st_folium(pm, width="stretch", height=650, key="mm_prov_map")
+    st.dataframe(prov_agg, width="stretch")
 
 elif view_mode == "Regions":
     st.markdown("Average travel time by region.")
@@ -466,12 +477,12 @@ elif view_mode == "Regions":
             icon=folium.Icon(color="red", icon="home", prefix="fa"),
             tooltip="📍 Origin",
         ).add_to(rm)
-        st_folium(rm, use_container_width=True, height=650, key="mm_region_map")
-    st.dataframe(region_agg, use_container_width=True)
+        st_folium(rm, width="stretch", height=650, key="mm_region_map")
+    st.dataframe(region_agg, width="stretch")
 
 elif view_mode == "Gradient":
-    st.markdown("Continuous heatmap: transit time to nearest reachable stop + last-mile distance.")
-    mile_kind = "last" if direction == "From address" else "first"
+    mile_kind = "first" if direction == "From address" else "last"
+    st.markdown(f"Continuous heatmap: transit time to nearest reachable stop + {mile_kind}-mile distance.")
     gm = render_gradient_map(df, global_max_time, transport_mode, prov_geo,
                              mile_kind=mile_kind)
     # Add origin marker
@@ -480,6 +491,6 @@ elif view_mode == "Gradient":
         icon=folium.Icon(color="red", icon="home", prefix="fa"),
         tooltip="📍 Origin",
     ).add_to(gm)
-    st_folium(gm, use_container_width=True, height=650, key="mm_gradient_map")
+    st_folium(gm, width="stretch", height=650, key="mm_gradient_map")
 
 render_footer()

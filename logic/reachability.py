@@ -10,21 +10,22 @@ import bisect
 import heapq
 import pandas as pd
 import numpy as np
-import gtfs_kit as gk
 from collections import defaultdict
 
 from .geo import get_province, haversine_km, PROVINCE_TO_REGION
 
 
 def _vectorized_time_to_minutes(series: pd.Series) -> np.ndarray:
-    """Convert GTFS time strings (HH:MM:SS) to minutes, vectorized."""
-    parts = series.str.split(":", n=2, expand=True)
+    """Convert GTFS time values (timedelta or HH:MM:SS strings) to minutes, vectorized."""
+    if pd.api.types.is_timedelta64_dtype(series):
+        return (series.dt.total_seconds() / 60).fillna(-1).astype(int).values
+    parts = series.astype(str).str.split(":", n=2, expand=True)
     hours = pd.to_numeric(parts[0], errors="coerce").fillna(-1)
     minutes = pd.to_numeric(parts[1], errors="coerce").fillna(0)
     return (hours * 60 + minutes).astype(int).values
 
 
-def build_timetable_graph(feed: gk.Feed, service_ids: set[str],
+def build_timetable_graph(feed, service_ids: set[str],
                            hour_filter: tuple | None = None) -> dict:
     """Build a timetable graph from GTFS data.
 
@@ -212,8 +213,7 @@ def compute_reachability_to_dest(station_id: str, reverse_departures: dict,
     merged: dict[str, dict] = {}
     _arr_times = _precompute_arr_times(reverse_departures)
 
-    for hour in range(arrival_window[0], arrival_window[1]):
-        arrive_by = hour * 60
+    for arrive_by in range(arrival_window[0] * 60, arrival_window[1] * 60, 5):
         reachable = _bfs_reverse(
             station_id, reverse_departures, max_minutes, arrive_by,
             max_transfers=max_transfers,
@@ -339,17 +339,16 @@ def compute_reachability_single(station_id: str, station_departures: dict,
                                  departure_window: tuple[int, int] = (8, 9)) -> dict[str, dict]:
     """BFS reachability from a single station across a departure window.
 
-    Runs BFS for each hour in the window and merges results, keeping the
+    Runs BFS every 5 minutes in the window and merges results, keeping the
     best (shortest travel time) route to each reachable station.
 
     Args:
-        departure_window: (start_hour, end_hour) — BFS runs once per hour.
+        departure_window: (start_hour, end_hour) — BFS runs every 5 minutes.
     """
     merged: dict[str, dict] = {}
     _dep_times = _precompute_dep_times(station_departures)
 
-    for hour in range(departure_window[0], departure_window[1]):
-        start_min = hour * 60
+    for start_min in range(departure_window[0] * 60, departure_window[1] * 60, 5):
         reachable = _bfs_single(
             station_id, station_departures, max_minutes, start_min,
             stop_lookup=stop_lookup,

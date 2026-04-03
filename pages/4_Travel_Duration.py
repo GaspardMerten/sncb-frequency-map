@@ -214,7 +214,7 @@ def _render_station_map(df, dest_name, max_time, key_suffix):
             tooltip=tip,
         ).add_to(m)
 
-    st_folium(m, use_container_width=True, height=500, key=f"dur_{key_suffix}")
+    st_folium(m, width="stretch", height=500, key=f"dur_{key_suffix}")
 
 
 def _render_province_view(df, dest_label):
@@ -235,8 +235,8 @@ def _render_province_view(df, dest_label):
             data["prov_geo"]["features"], prov_totals, pcmap, "name",
             lambda n, t: f"{n}: {t:.0f} min avg",
         )
-        st_folium(pm, use_container_width=True, height=500, key=f"dur_prov_{dest_label}")
-    st.dataframe(prov_agg, use_container_width=True)
+        st_folium(pm, width="stretch", height=500, key=f"dur_prov_{dest_label}")
+    st.dataframe(prov_agg, width="stretch")
 
 
 def _render_region_view(df, dest_label):
@@ -267,8 +267,8 @@ def _render_region_view(df, dest_label):
             region_geo["features"], region_totals, rcmap, "region",
             lambda n, t: f"{n}: {t:.0f} min avg",
         )
-        st_folium(rm, use_container_width=True, height=500, key=f"dur_reg_{dest_label}")
-    st.dataframe(region_agg, use_container_width=True)
+        st_folium(rm, width="stretch", height=500, key=f"dur_reg_{dest_label}")
+    st.dataframe(region_agg, width="stretch")
 
 
 def _render_voronoi_view(df, dest_label, max_time, key_suffix):
@@ -282,13 +282,13 @@ def _render_voronoi_view(df, dest_label, max_time, key_suffix):
         ),
         prov_geo=data["prov_geo"],
     )
-    st_folium(vm, use_container_width=True, height=500, key=f"dur_vor_{key_suffix}")
+    st_folium(vm, width="stretch", height=500, key=f"dur_vor_{key_suffix}")
 
 
 def _render_gradient_view(df, max_time, key_suffix):
     mile_kind = "first" if direction == "To destination" else "last"
     gm = render_gradient_map(df, max_time, transport_mode, data["prov_geo"], mile_kind=mile_kind)
-    st_folium(gm, use_container_width=True, height=500, key=f"dur_grad_{key_suffix}")
+    st_folium(gm, width="stretch", height=500, key=f"dur_grad_{key_suffix}")
 
 
 # ── Header ───────────────────────────────────────────────────────────────────
@@ -373,6 +373,6 @@ for dest_name, dest_id in zip(destination_names, destination_ids):
         display = df_ok[["station_name", "travel_time", "transfers", "province", "region"]].copy()
         display.columns = ["Station", "Travel Time (min)", "Transfers", "Province", "Region"]
         st.dataframe(display.sort_values("Travel Time (min)").reset_index(drop=True),
-                     use_container_width=True, height=300)
+                     width="stretch", height=300)
 
 render_footer()

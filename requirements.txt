@@ -7,5 +7,5 @@ streamlit-folium
 branca
 python-dotenv
 shapely
-gtfs-kit
+gtfs-parquet
 plotly

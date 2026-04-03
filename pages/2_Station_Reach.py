@@ -80,7 +80,7 @@ For each station: *how many other stations can you reach within a given time bud
 
 **Algorithm — Breadth-First Search (BFS) on the timetable**
 1. A timetable graph is built from GTFS data: for every station, the list of departures (destination, departure time, arrival time, trip ID) during the selected time window.
-2. Starting from a station at every minute in the **departure window** (e.g. 7:00–9:00), the algorithm explores all reachable destinations by following actual train connections.
+2. Starting from a station every 5 minutes in the **departure window** (e.g. 7:00–9:00), the algorithm explores all reachable destinations by following actual train connections.
 3. **Transfers** are allowed: when arriving at an intermediate station, you can board a different train after a minimum transfer time (configurable, default 5 min).
 4. The search stops when the travel time exceeds the **time budget** or the **maximum number of transfers** is reached.
 5. The best result (shortest time, fewest transfers) across all departure minutes is kept.
@@ -238,12 +238,12 @@ if view_mode == "Stations":
 
         st.info(f"**{sel_row['station_name']}** can reach **{len(reachable)}** stations within {max_hours}h.")
 
-    st_folium(m, use_container_width=True, height=700, key="reach_map")
+    st_folium(m, width="stretch", height=700, key="reach_map")
 
     st.subheader("Station Reachability Table")
     display_df = reach_df[["station_name", "reachable_count", "avg_travel_time", "province", "region"]].copy()
     display_df.columns = ["Station", "Reachable Stations", "Avg Travel (min)", "Province", "Region"]
-    st.dataframe(display_df, use_container_width=True, height=400)
+    st.dataframe(display_df, width="stretch", height=400)
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PROVINCE VIEW
@@ -267,7 +267,7 @@ elif view_mode == "Provinces":
             data["prov_geo"]["features"], prov_totals, pcmap, "name",
             lambda n, t: f"{n}: {t:.1f} avg reachable stations",
         )
-        st_folium(pm, use_container_width=True, height=700, key="reach_prov_map")
+        st_folium(pm, width="stretch", height=700, key="reach_prov_map")
 
     col_p1, col_p2 = st.columns(2)
     with col_p1:
@@ -277,7 +277,7 @@ elif view_mode == "Provinces":
         st.markdown("**Avg travel time (min)**")
         st.bar_chart(prov_agg["avg_travel_time"], color="#08519c")
 
-    st.dataframe(prov_agg, use_container_width=True)
+    st.dataframe(prov_agg, width="stretch")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  REGION VIEW
@@ -311,7 +311,7 @@ elif view_mode == "Regions":
             region_geo["features"], region_totals, rcmap, "region",
             lambda n, t: f"{n}: {t:.1f} avg reachable stations",
         )
-        st_folium(rm, use_container_width=True, height=700, key="reach_region_map")
+        st_folium(rm, width="stretch", height=700, key="reach_region_map")
 
     col_r1, col_r2 = st.columns(2)
     with col_r1:
@@ -321,7 +321,7 @@ elif view_mode == "Regions":
         st.markdown("**Avg travel time (min)**")
         st.bar_chart(region_agg["avg_travel_time"], color="#08519c")
 
-    st.dataframe(region_agg, use_container_width=True)
+    st.dataframe(region_agg, width="stretch")
 
 elif view_mode == "Voronoi":
     st.markdown("Voronoi tessellation — each cell colored by its station's reachable count.")
@@ -336,6 +336,6 @@ elif view_mode == "Voronoi":
         ),
         prov_geo=data["prov_geo"],
     )
-    st_folium(vm, use_container_width=True, height=700, key="reach_voronoi_map")
+    st_folium(vm, width="stretch", height=700, key="reach_voronoi_map")
 
 render_footer()

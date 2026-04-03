@@ -33,9 +33,16 @@ data = load_all_data(filters)
 segment_freqs = data["segment_freqs"]
 cluster_map = data.get("cluster_map")
 
+# Hashable fingerprint so the cache invalidates when filters change
+_filter_key = (
+    filters["start_date"], filters["end_date"], filters["day_count"],
+    tuple(filters["weekdays"]),
+    tuple(filters["hour_filter"]) if filters.get("hour_filter") else None,
+)
+
 @st.cache_data(show_spinner="Mapping to infrastructure...", ttl=3600)
-def _cached_segments(_seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra,
-                     _prov_geo, _cluster_map, _served_stations):
+def _cached_segments(filter_key, _seg_freqs, _stop_lookup, _infrabel_segs,
+                     _gtfs_to_infra, _prov_geo, _cluster_map, _served_stations):
     segments, stats = map_frequencies_to_infra(
         _seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra, _prov_geo,
         cluster_map=_cluster_map,
@@ -46,7 +53,7 @@ def _cached_segments(_seg_freqs, _stop_lookup, _infrabel_segs, _gtfs_to_infra,
     return segments, segments_merged, station_freqs, stats
 
 segments, segments_merged, station_freqs, mapping_stats = _cached_segments(
-    segment_freqs, data["stop_lookup"],
+    _filter_key, segment_freqs, data["stop_lookup"],
     data["infrabel_segs"], data["gtfs_to_infra"], data["prov_geo"],
     cluster_map, data.get("served_stations"),
 )
@@ -152,14 +159,14 @@ if view_mode == "Segments":
                            station_freqs=station_freqs,
                            stop_lookup=data["stop_lookup"],
                            gtfs_to_infra=data["gtfs_to_infra"])
-    st_folium(m, use_container_width=True, height=700, key="seg_map")
+    st_folium(m, width="stretch", height=700, key="seg_map")
     with st.expander("Segment data"):
         df = pd.DataFrame([
             {"From": s["stop_a"], "To": s["stop_b"],
              "Trains/day": round(s["frequency"], 1), "Province": s["province"]}
             for s in segments_merged
         ]).sort_values("Trains/day", ascending=False).reset_index(drop=True)
-        st.dataframe(df, use_container_width=True, height=400)
+        st.dataframe(df, width="stretch", height=400)
 
 elif view_mode == "Provinces":
     st.markdown("Sum of segment frequencies whose midpoint falls in each province.")
@@ -171,8 +178,8 @@ elif view_mode == "Provinces":
         m = render_choropleth(data["prov_geo"]["features"], prov_totals, pcmap,
                               segments, "name",
                               lambda n, t: f"{n}: {t:.0f} segment-trains/day")
-        st_folium(m, use_container_width=True, height=700, key="prov_map")
-    st.dataframe(prov_stats, use_container_width=True)
+        st_folium(m, width="stretch", height=700, key="prov_map")
+    st.dataframe(prov_stats, width="stretch")
 
 elif view_mode == "Regions":
     st.markdown("Same aggregation grouped into Belgium's three regions.")
@@ -195,8 +202,8 @@ elif view_mode == "Regions":
         m = render_choropleth(region_geo["features"], region_totals, rcmap,
                               segments, "region",
                               lambda n, t: f"{n}: {t:.0f} segment-trains/day")
-        st_folium(m, use_container_width=True, height=700, key="region_map")
-    st.dataframe(region_stats, use_container_width=True)
+        st_folium(m, width="stretch", height=700, key="region_map")
+    st.dataframe(region_stats, width="stretch")
 
 elif view_mode == "Voronoi":
     st.markdown("Station frequency Voronoi — each cell colored by its station's total trains/day.")
@@ -216,7 +223,7 @@ elif view_mode == "Voronoi":
                 tooltip_fn=lambda r: f"<b>{r['station_name']}</b><br/>{r['frequency']:.0f} trains/day",
                 prov_geo=data["prov_geo"],
             )
-            st_folium(vm, use_container_width=True, height=700, key="voronoi_map")
+            st_folium(vm, width="stretch", height=700, key="voronoi_map")
     else:
         st.warning("No station frequency data available.")
 

@@ -157,7 +157,7 @@ with col1:
         </div>
     </div>
     """, unsafe_allow_html=True)
-    if st.button("Open Segment Frequency", key="nav_seg", use_container_width=True):
+    if st.button("Open Segment Frequency", key="nav_seg", width="stretch"):
         st.switch_page("pages/1_Segment_Frequency.py")
 
 with col2:
@@ -174,7 +174,7 @@ with col2:
         </div>
     </div>
     """, unsafe_allow_html=True)
-    if st.button("Open Station Reach", key="nav_reach", use_container_width=True):
+    if st.button("Open Station Reach", key="nav_reach", width="stretch"):
         st.switch_page("pages/2_Station_Reach.py")
 
 col3, col4 = st.columns(2)
@@ -193,7 +193,7 @@ with col3:
         </div>
     </div>
     """, unsafe_allow_html=True)
-    if st.button("Open Connectivity", key="nav_conn", use_container_width=True):
+    if st.button("Open Connectivity", key="nav_conn", width="stretch"):
         st.switch_page("pages/3_Station_Connectivity.py")
 
 with col4:
@@ -210,7 +210,7 @@ with col4:
         </div>
     </div>
     """, unsafe_allow_html=True)
-    if st.button("Open Travel Duration", key="nav_dur", use_container_width=True):
+    if st.button("Open Travel Duration", key="nav_dur", width="stretch"):
         st.switch_page("pages/4_Travel_Duration.py")
 
 st.markdown("""

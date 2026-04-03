@@ -145,7 +145,7 @@ for _, row in df.iterrows():
         ),
     ).add_to(m)
 
-st_folium(m, use_container_width=True, height=550, key="freq_map")
+st_folium(m, width="stretch", height=550, key="freq_map")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  SCATTER PLOTS — one tab per station size
@@ -183,7 +183,7 @@ def _scatter_section(subset, key_prefix):
         subset, x="A_reachable", y="B_direct_freq",
         size="C_reach_km", labels=scatter_labels, **common,
     )
-    st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_ab")
+    st.plotly_chart(fig1, width="stretch", key=f"{key_prefix}_ab")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -192,14 +192,14 @@ def _scatter_section(subset, key_prefix):
             size="A_reachable",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
-        st.plotly_chart(fig2, use_container_width=True, key=f"{key_prefix}_bc")
+        st.plotly_chart(fig2, width="stretch", key=f"{key_prefix}_bc")
     with col2:
         fig3 = px.scatter(
             subset, x="A_reachable", y="C_reach_km",
             size="B_direct_freq",
             labels=scatter_labels, height=380, **{k: v for k, v in common.items() if k != "height"},
         )
-        st.plotly_chart(fig3, use_container_width=True, key=f"{key_prefix}_ac")
+        st.plotly_chart(fig3, width="stretch", key=f"{key_prefix}_ac")
 
     with st.expander(f"Station data ({len(subset)} stations)"):
         display = subset[["station_name", "A_reachable", "B_direct_freq",
@@ -207,7 +207,7 @@ def _scatter_section(subset, key_prefix):
         display.columns = ["Station", "Reachable (A)", "Direct freq/h (B)",
                             "Reach NESW km (C)", "Region", "Province", "Size"]
         st.dataframe(display.sort_values("Reachable (A)", ascending=False).reset_index(drop=True),
-                     use_container_width=True, height=300)
+                     width="stretch", height=300)
 
 
 # Render tabs for each selected size
@@ -240,6 +240,6 @@ size_agg = df.groupby("station_size").agg(
     avg_C=("C_reach_km", "mean"),
 ).reindex(SIZE_ORDER).dropna(how="all").round(2)
 size_agg.columns = ["Stations", "Avg reachable (A)", "Avg freq/h (B)", "Reach NESW km (C)"]
-st.dataframe(size_agg, use_container_width=True)
+st.dataframe(size_agg, width="stretch")
 
 render_footer()

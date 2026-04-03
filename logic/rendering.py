@@ -34,6 +34,11 @@ def make_step_colormap(values: list[float], caption: str) -> cm.StepColormap:
     edges = np.unique(np.round(np.quantile(arr, np.linspace(0, 1, n_bins + 1)), 1))
     if len(edges) < 3:
         edges = np.round(np.linspace(arr.min(), arr.max(), n_bins + 1), 1)
+    # Use integers when the range is large enough to avoid cramped decimals
+    if edges[-1] - edges[0] >= n_bins:
+        edges = np.unique(np.round(edges).astype(int))
+        if len(edges) < 3:
+            edges = np.round(np.linspace(arr.min(), arr.max(), n_bins + 1)).astype(int)
     n_intervals = len(edges) - 1
     colors = list(PALETTE[:n_intervals])
     while len(colors) < n_intervals:
@@ -53,24 +58,27 @@ def _add_legend_css(m):
     <style>
         .legend.leaflet-control {
             background: rgba(255,255,255,0.92) !important;
-            padding: 8px 14px !important;
+            padding: 10px 16px !important;
             border-radius: 6px !important;
             box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
             font-size: 13px !important;
             line-height: 1.6 !important;
+            min-width: 300px !important;
         }
         .legend.leaflet-control .caption {
             font-weight: 700 !important;
-            font-size: 13px !important;
-            margin-bottom: 4px !important;
+            font-size: 14px !important;
+            margin-bottom: 6px !important;
             color: #333 !important;
         }
         .legend.leaflet-control svg {
-            height: 20px !important;
+            height: 28px !important;
+            width: 100% !important;
         }
         .legend.leaflet-control .tick text {
-            font-size: 11px !important;
-            font-weight: 500 !important;
+            font-size: 13px !important;
+            font-weight: 600 !important;
+            fill: #333 !important;
         }
         div.legend {
             font-size: 13px !important;
@@ -357,6 +365,7 @@ def render_gradient_map(df, max_time, transport_mode, prov_geo, resolution=200, 
     # Vectorized RGBA computation (no per-pixel string parsing)
     ratio = grid_display / effective_max if effective_max > 0 else np.zeros_like(grid_display)
     ratio = np.clip(ratio, 0, 1)
+    ratio = np.nan_to_num(ratio, nan=0.0)
 
     r = np.zeros((resolution, resolution), dtype=np.uint8)
     g = np.zeros((resolution, resolution), dtype=np.uint8)
