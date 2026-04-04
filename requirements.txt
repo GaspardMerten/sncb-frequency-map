@@ -9,3 +9,4 @@ python-dotenv
 shapely
 gtfs-parquet
 plotly
+scipy

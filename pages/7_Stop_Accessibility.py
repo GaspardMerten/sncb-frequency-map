@@ -3,12 +3,8 @@
 Gradient map showing how long it takes from any point in Belgium to reach
 the nearest transit stop, for selected operators and transport modes.
 
-Two operator roles:
-- **Destination operators**: the stops you want to reach (e.g. SNCB stations).
-- **Feeder operators**: transit you can ride to get closer (e.g. De Lijn, TEC buses).
-  When enabled, a multi-source BFS propagates from all destination stops through
-  the feeder network, giving travel time at every feeder stop.  The grid then
-  becomes: walk/bike to nearest feeder stop + transit time to destination.
+Uses scipy cKDTree for O(n log k) nearest-stop lookup instead of brute-force.
+Belgium mask is cached across calls. RGBA image built in a single pass.
 """
 
 import os
@@ -17,13 +13,13 @@ import base64
 from datetime import date, datetime, timedelta
 
 import numpy as np
-import pandas as pd
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
 import branca.colormap as cm
 from shapely.geometry import Point
 from shapely import prepared as shp_prepared
+from scipy.spatial import cKDTree
 from dotenv import load_dotenv
 
 from logic.shared import CUSTOM_CSS, render_footer, load_provinces_geojson, noon_timestamp
@@ -134,18 +130,22 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ── Load stop locations ──────────────────────────────────────────────────────
+# ── Load stop locations (as numpy arrays, not DataFrame) ─────────────────────
 
 all_operators = list(set(dest_operators + feeder_operators))
 ts = noon_timestamp(target_date.year, target_date.month)
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _load_stop_locations(operators, ts, token, target_date_):
-    """Load GTFS feeds and extract active stop locations."""
-    feeds = {}
+def _load_stop_arrays(operators, ts, token, target_date_):
+    """Load GTFS feeds and extract active stop locations as numpy arrays."""
     progress = st.progress(0, text="Loading stop data...")
     n_ops = len(operators)
+
+    all_lats = []
+    all_lons = []
+    all_names = []
+    all_ops = []
 
     for i, op_name in enumerate(operators):
         slug = OPERATORS[op_name]
@@ -160,44 +160,28 @@ def _load_stop_locations(operators, ts, token, target_date_):
         if feed.stops is None:
             continue
 
+        # Find active stop IDs
+        active_ids = None
         sids = get_active_service_ids(feed, [target_date_])
         if sids and feed.trips is not None:
             active_trips = set(feed.trips.loc[feed.trips["service_id"].isin(sids), "trip_id"])
             if feed.stop_times is not None and active_trips:
-                active_stop_ids = set(
+                active_ids = set(
                     feed.stop_times.loc[
                         feed.stop_times["trip_id"].isin(active_trips), "stop_id"
                     ].astype(str).str.strip()
                 )
-                feed._active_stop_ids = active_stop_ids
-            else:
-                feed._active_stop_ids = None
-        else:
-            feed._active_stop_ids = None
 
-        feeds[op_name] = feed
-
-    if not feeds:
-        progress.empty()
-        return None
-
-    progress.progress(0.9, text="Building stop index...")
-
-    all_stops = []
-    for operator, feed in feeds.items():
         stops = feed.stops
         lats = stops["stop_lat"].values.astype(float)
         lons = stops["stop_lon"].values.astype(float)
         sids_arr = stops["stop_id"].astype(str).str.strip().values
-        if "parent_station" in stops.columns:
-            parents = stops["parent_station"].fillna("").astype(str).str.strip().values
-        else:
-            parents = np.full(len(stops), "", dtype=object)
+        parents = (stops["parent_station"].fillna("").astype(str).str.strip().values
+                   if "parent_station" in stops.columns
+                   else np.full(len(stops), "", dtype=object))
         names = stops["stop_name"].fillna("").values
 
-        active_ids = getattr(feed, "_active_stop_ids", None)
         seen = set()
-
         for j in range(len(stops)):
             lat, lon = lats[j], lons[j]
             if np.isnan(lat) or np.isnan(lon):
@@ -205,41 +189,47 @@ def _load_stop_locations(operators, ts, token, target_date_):
             if not (49.4 <= lat <= 51.6 and 2.5 <= lon <= 6.5):
                 continue
             if active_ids is not None:
-                sid = sids_arr[j]
-                parent = parents[j]
-                if sid not in active_ids and parent not in active_ids:
+                if sids_arr[j] not in active_ids and parents[j] not in active_ids:
                     continue
-
             key = parents[j] if parents[j] else sids_arr[j]
-            dedup_key = f"{operator}:{key}"
-            if dedup_key in seen:
+            dedup = f"{op_name}:{key}"
+            if dedup in seen:
                 continue
-            seen.add(dedup_key)
-
-            all_stops.append({
-                "operator": operator,
-                "name": names[j],
-                "lat": float(lat),
-                "lon": float(lon),
-            })
+            seen.add(dedup)
+            all_lats.append(lat)
+            all_lons.append(lon)
+            all_names.append(names[j])
+            all_ops.append(op_name)
 
     progress.progress(1.0, text="Done!")
     progress.empty()
-    return pd.DataFrame(all_stops)
+
+    if not all_lats:
+        return None
+
+    return {
+        "lats": np.array(all_lats, dtype=np.float64),
+        "lons": np.array(all_lons, dtype=np.float64),
+        "names": all_names,
+        "operators": all_ops,
+    }
 
 
-stops_df = _load_stop_locations(
-    tuple(all_operators), ts, token, target_date,
-)
+stop_data = _load_stop_arrays(tuple(all_operators), ts, token, target_date)
 
-if stops_df is None or stops_df.empty:
+if stop_data is None:
     st.error("No stop data could be loaded.")
     st.stop()
 
-dest_stops = stops_df[stops_df["operator"].isin(dest_operators)]
-feeder_stops = stops_df[stops_df["operator"].isin(feeder_operators)] if feeder_operators else pd.DataFrame()
+# Build operator masks
+op_arr = np.array(stop_data["operators"])
+dest_mask = np.isin(op_arr, dest_operators)
+feeder_mask = np.isin(op_arr, feeder_operators) if feeder_operators else np.zeros(len(op_arr), dtype=bool)
 
-if dest_stops.empty:
+n_dest = dest_mask.sum()
+n_feeder = feeder_mask.sum()
+
+if n_dest == 0:
     st.error("No active stops found for the destination operator(s).")
     st.stop()
 
@@ -266,69 +256,46 @@ st.caption(caption_text)
 with st.expander("How is this computed?"):
     if use_feeder and feeder_operators:
         st.markdown(f"""
-**Goal**: Show how long it takes from any point in Belgium to reach the
-nearest **{dest_str}** stop, using **{feeder_str}** feeder transit.
-
 **Method (with feeder transit)**:
-1. A single **multi-source BFS** starts from all {len(dest_stops):,} destination stops
-   simultaneously (travel time = 0 at each).
-2. It propagates outward through the combined feeder + destination timetable,
-   recording the minimum travel time to reach every stop in the network.
-3. This gives a travel time at every reachable transit stop (feeder or destination).
-4. A {resolution}x{resolution} grid is placed over Belgium. For each cell:
-   total time = **{transport_mode.lower()} to nearest reachable stop** + **that stop's transit time**.
-5. Full resolution, no sampling — the BFS runs once, the grid is vectorized.
-
-**Settings**:
-- Departure window: {feeder_dep_window[0]}h–{feeder_dep_window[1]}h
-- Transfer distance: {feeder_transfer_dist}m
-- Transit time budget: {feeder_max_time} min
-- Currently: **{len(dest_stops):,}** destination stops, **{len(feeder_stops):,}** feeder stops.
+1. Multi-source BFS from all {n_dest:,} destination stops through the feeder network.
+2. {resolution}x{resolution} grid over Belgium. For each cell:
+   total = {transport_mode.lower()} to nearest reachable stop + transit time.
+3. Uses **scipy cKDTree** for O(n log k) nearest-stop lookup.
 """)
     else:
         st.markdown(f"""
-**Goal**: Show how long it takes from any point in Belgium to reach the
-nearest **{dest_str}** stop by {transport_mode.lower()}.
-
 **Method (direct)**:
-A {resolution}x{resolution} grid is placed over Belgium.
-For each cell, the Manhattan distance to every destination stop is computed:
-`d = |lat_diff| x 111 + |lon_diff| x 71` km.
-Travel time = `d / {speed} x 60` minutes ({transport_mode} at {speed} km/h).
-The minimum across all stops is kept.
-
-**Filters**:
-- Only stops with active services on {target_date} are included.
-- Cells beyond **{max_time_min} min** or **{max_distance_km} km** from any stop are masked.
-- Currently showing **{len(dest_stops):,}** active destination stops.
+{resolution}x{resolution} grid. For each cell, find nearest destination stop
+using **scipy cKDTree** (Manhattan-approximated). Travel time = distance / {speed} km/h.
 """)
 
 # Metrics
 mc = st.columns(2 + len(dest_operators) + (len(feeder_operators) if use_feeder else 0))
-mc[0].metric("Destination stops", f"{len(dest_stops):,}")
+mc[0].metric("Destination stops", f"{n_dest:,}")
 col_idx = 1
 for op in dest_operators:
-    n = (dest_stops["operator"] == op).sum()
+    n = (op_arr[dest_mask] == op).sum()
     if col_idx < len(mc):
         mc[col_idx].metric(f"{op}", f"{n:,}")
         col_idx += 1
 if use_feeder and feeder_operators:
     if col_idx < len(mc):
-        mc[col_idx].metric("Feeder stops", f"{len(feeder_stops):,}")
+        mc[col_idx].metric("Feeder stops", f"{n_feeder:,}")
         col_idx += 1
     for op in feeder_operators:
-        n = (feeder_stops["operator"] == op).sum() if not feeder_stops.empty else 0
+        n = (op_arr[feeder_mask] == op).sum()
         if col_idx < len(mc):
             mc[col_idx].metric(f"{op}", f"{n:,}")
             col_idx += 1
 
-# ── Compute grid ─────────────────────────────────────────────────────────────
+# ── Cached Belgium mask ──────────────────────────────────────────────────────
 
 prov_geo = load_provinces_geojson()
 
 
-def _build_belgium_mask(res):
-    """Build boolean mask of grid cells inside Belgium."""
+@st.cache_data(show_spinner=False, ttl=86400)
+def _cached_belgium_mask(res, _prov_geo_id):
+    """Build and cache boolean mask of grid cells inside Belgium."""
     lat_lin = np.linspace(BE_LAT_MIN, BE_LAT_MAX, res)
     lon_lin = np.linspace(BE_LON_MIN, BE_LON_MAX, res)
 
@@ -339,11 +306,8 @@ def _build_belgium_mask(res):
     step = 4
     for i in range(0, res, step):
         for j in range(0, res, step):
-            inside = belgium_prep.contains(Point(lon_lin[j], lat_lin[i]))
-            i_end = min(i + step, res)
-            j_end = min(j + step, res)
-            if inside:
-                mask[i:i_end, j:j_end] = True
+            if belgium_prep.contains(Point(lon_lin[j], lat_lin[i])):
+                mask[i:min(i + step, res), j:min(j + step, res)] = True
 
     for i in range(res):
         for j in range(res):
@@ -351,65 +315,58 @@ def _build_belgium_mask(res):
             if bi == 0 or bj == 0 or bi == step - 1 or bj == step - 1:
                 mask[i, j] = belgium_prep.contains(Point(lon_lin[j], lat_lin[i]))
 
-    return mask, lat_lin, lon_lin
+    return mask
 
 
-def _vectorized_grid(stop_lats, stop_lons, stop_times, speed_kmh,
-                     max_time, max_dist_km, res):
-    """Vectorized grid: for each cell, walk/bike to nearest stop + stop_time."""
-    s_lats = np.array(stop_lats, dtype=np.float64)
-    s_lons = np.array(stop_lons, dtype=np.float64)
-    s_times = np.array(stop_times, dtype=np.float64)
+# ── Grid computation with cKDTree ────────────────────────────────────────────
+
+@st.cache_data(show_spinner="Computing accessibility grid...", ttl=3600)
+def _compute_grid_kdtree(stop_lats, stop_lons, stop_times, speed_kmh,
+                         max_time, max_dist_km, res, _prov_geo_id):
+    """Compute travel time grid using cKDTree for nearest-stop lookup.
+
+    Uses scaled coordinates so Euclidean distance approximates Manhattan/great-circle.
+    """
+    s_lats = np.asarray(stop_lats, dtype=np.float64)
+    s_lons = np.asarray(stop_lons, dtype=np.float64)
+    s_times = np.asarray(stop_times, dtype=np.float64)
+
+    # Scale to approximate km: lat*111, lon*71 (at ~50.5N)
+    stop_coords = np.column_stack([s_lats * 111.0, s_lons * 71.0])
+    tree = cKDTree(stop_coords)
 
     lat_lin = np.linspace(BE_LAT_MIN, BE_LAT_MAX, res)
     lon_lin = np.linspace(BE_LON_MIN, BE_LON_MAX, res)
 
-    grid_lat = lat_lin[:, None]
-    grid_lon = lon_lin[None, :]
+    # Build grid coordinates (res*res, 2)
+    grid_lat, grid_lon = np.meshgrid(lat_lin, lon_lin, indexing="ij")
+    grid_coords = np.column_stack([
+        grid_lat.ravel() * 111.0,
+        grid_lon.ravel() * 71.0,
+    ])
 
-    grid_time = np.full((res, res), np.inf)
-    grid_dist = np.full((res, res), np.inf)
-    chunk = 50
-    for s_start in range(0, len(s_lats), chunk):
-        s_end = min(s_start + chunk, len(s_lats))
-        dlat = np.abs(grid_lat[:, :, None] - s_lats[None, None, s_start:s_end]) * 111.0
-        dlon = np.abs(grid_lon[:, :, None] - s_lons[None, None, s_start:s_end]) * 71.0
-        dist = dlat + dlon
-        total = s_times[None, None, s_start:s_end] + dist / speed_kmh * 60.0
+    # Query nearest stop for each grid cell — O(n_cells * log(n_stops))
+    dists_km, indices = tree.query(grid_coords, k=1)
 
-        chunk_best = total.argmin(axis=2)
-        chunk_min_time = np.take_along_axis(total, chunk_best[:, :, None], axis=2).squeeze(axis=2)
-        chunk_min_dist = np.take_along_axis(dist, chunk_best[:, :, None], axis=2).squeeze(axis=2)
+    # Total time = stop travel time + walk/bike distance
+    grid_time = (s_times[indices] + dists_km / speed_kmh * 60.0).reshape(res, res)
 
-        improved = chunk_min_time < grid_time
-        grid_time[improved] = chunk_min_time[improved]
-        grid_dist[improved] = chunk_min_dist[improved]
-
-    mask, _, _ = _build_belgium_mask(res)
+    # Apply Belgium mask
+    mask = _cached_belgium_mask(res, id(prov_geo))
     grid_time[~mask] = np.nan
     grid_time[grid_time > max_time] = np.nan
     if max_dist_km < 999:
+        grid_dist = dists_km.reshape(res, res)
         grid_time[grid_dist > max_dist_km] = np.nan
 
     return grid_time
 
 
-# ── Direct mode (walk/bike to destination stops, all have time=0) ────────────
-
-@st.cache_data(show_spinner="Computing accessibility grid...", ttl=3600)
-def _compute_direct_grid(stop_lats, stop_lons, speed_kmh, max_time, max_dist_km,
-                         res, _prov_geo_id):
-    stop_times = [0.0] * len(stop_lats)
-    return _vectorized_grid(stop_lats, stop_lons, stop_times,
-                            speed_kmh, max_time, max_dist_km, res)
-
-
-# ── Feeder mode: multi-source BFS + vectorized grid ─────────────────────────
+# ── Feeder mode: multi-source BFS + grid ─────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _build_feeder_graph(dest_ops, feeder_ops, ts, token, target_date_,
                         dep_window, transfer_dist_km):
-    """Build combined timetable graph and run multi-source BFS from dest stops."""
     combined_ops = list(set(list(dest_ops) + list(feeder_ops)))
     feeds = {}
     sids_per_op = {}
@@ -444,7 +401,6 @@ def _build_feeder_graph(dest_ops, feeder_ops, ts, token, target_date_,
     progress.progress(0.8, text="Building transfer edges...")
     transfers = build_transfer_edges(stop_lookup, max_walk_km=transfer_dist_km)
 
-    # Identify destination stop IDs
     dest_stop_ids = {sid for sid, info in stop_lookup.items()
                      if info["operator"] in dest_ops}
 
@@ -459,10 +415,9 @@ def _build_feeder_graph(dest_ops, feeder_ops, ts, token, target_date_,
     }
 
 
-@st.cache_data(show_spinner="Running multi-source BFS from destination stops...", ttl=3600)
+@st.cache_data(show_spinner="Running multi-source BFS...", ttl=3600)
 def _run_feeder_bfs(_graph, _transfers, _stop_lookup, _dest_stop_ids,
                     max_transit_min, dep_window):
-    """Single multi-source BFS from all destination stops outward."""
     return bfs_from_stops(
         _dest_stop_ids, _stop_lookup, _graph, _transfers,
         max_minutes=max_transit_min,
@@ -472,27 +427,7 @@ def _run_feeder_bfs(_graph, _transfers, _stop_lookup, _dest_stop_ids,
     )
 
 
-@st.cache_data(show_spinner="Computing feeder accessibility grid...", ttl=3600)
-def _compute_feeder_grid(bfs_results, _stop_lookup, speed_kmh,
-                         max_time, res, _prov_geo_id):
-    """Build full-resolution grid from BFS stop-level results."""
-    stop_lats = []
-    stop_lons = []
-    stop_times = []
-    for sid, info in bfs_results.items():
-        if sid in _stop_lookup:
-            stop_lats.append(_stop_lookup[sid]["lat"])
-            stop_lons.append(_stop_lookup[sid]["lon"])
-            stop_times.append(info["travel_time"])
-
-    if not stop_lats:
-        return np.full((res, res), np.nan)
-
-    return _vectorized_grid(stop_lats, stop_lons, stop_times,
-                            speed_kmh, max_time, 999.0, res)
-
-
-# ── Compute the appropriate grid ─────────────────────────────────────────────
+# ── Compute the grid ─────────────────────────────────────────────────────────
 
 if use_feeder and feeder_operators:
     feeder_data = _build_feeder_graph(
@@ -515,18 +450,31 @@ if use_feeder and feeder_operators:
         st.warning("BFS found no reachable stops from destination stops.")
         st.stop()
 
-    grid_time = _compute_feeder_grid(
-        bfs_results, feeder_data["stop_lookup"], speed,
-        max_time_min, resolution, id(prov_geo),
+    # Extract stop coords + times from BFS results
+    sl = feeder_data["stop_lookup"]
+    bfs_lats = []
+    bfs_lons = []
+    bfs_times = []
+    for sid, info in bfs_results.items():
+        if sid in sl:
+            bfs_lats.append(sl[sid]["lat"])
+            bfs_lons.append(sl[sid]["lon"])
+            bfs_times.append(info["travel_time"])
+
+    grid_time = _compute_grid_kdtree(
+        bfs_lats, bfs_lons, bfs_times,
+        speed, max_time_min, 999.0, resolution, id(prov_geo),
     )
 else:
-    grid_time = _compute_direct_grid(
-        dest_stops["lat"].tolist(), dest_stops["lon"].tolist(),
-        speed, max_time_min, max_distance_km, resolution,
-        id(prov_geo),
+    d_lats = stop_data["lats"][dest_mask]
+    d_lons = stop_data["lons"][dest_mask]
+    grid_time = _compute_grid_kdtree(
+        d_lats.tolist(), d_lons.tolist(),
+        [0.0] * int(dest_mask.sum()),
+        speed, max_time_min, max_distance_km, resolution, id(prov_geo),
     )
 
-# ── Gradient view ────────────────────────────────────────────────────────────
+# ── Gradient view (single-pass RGBA) ─────────────────────────────────────────
 
 if view_mode == "Gradient":
     valid = ~np.isnan(grid_time)
@@ -536,41 +484,39 @@ if view_mode == "Gradient":
 
     effective_max = float(np.nanmax(grid_time))
 
-    # Build RGBA image
-    ratio = np.where(valid, grid_time / max(effective_max, 0.01), 0.0)
-    ratio = np.clip(ratio, 0, 1)
-
-    r = np.zeros_like(ratio, dtype=np.uint8)
-    g = np.zeros_like(ratio, dtype=np.uint8)
-    b = np.zeros_like(ratio, dtype=np.uint8)
-
-    lo = ratio < 0.5
-    hi = ~lo
-    r2_lo = ratio * 2
-    r2_hi = (ratio - 0.5) * 2
-
-    r[lo] = np.clip(34 + (255 - 34) * r2_lo[lo], 0, 255).astype(np.uint8)
-    g[lo] = np.clip(180 - 40 * r2_lo[lo], 0, 255).astype(np.uint8)
-    b[lo] = np.clip(34 - 30 * r2_lo[lo], 0, 255).astype(np.uint8)
-
-    r[hi] = np.clip(255 - 35 * r2_hi[hi], 0, 255).astype(np.uint8)
-    g[hi] = np.clip(140 - 120 * r2_hi[hi], 0, 255).astype(np.uint8)
-    b[hi] = np.clip(4 + 30 * r2_hi[hi], 0, 255).astype(np.uint8)
-
+    # Build RGBA in one pass — no separate r/g/b arrays
     rgba = np.zeros((resolution, resolution, 4), dtype=np.uint8)
-    rgba[valid, 0] = r[valid]
-    rgba[valid, 1] = g[valid]
-    rgba[valid, 2] = b[valid]
-    rgba[valid, 3] = 180
+    ratio = np.where(valid, grid_time / max(effective_max, 0.01), 0.0)
+    np.clip(ratio, 0, 1, out=ratio)
 
-    rgba_flipped = np.flipud(rgba)
+    lo = valid & (ratio < 0.5)
+    hi = valid & (ratio >= 0.5)
+    r2_lo = ratio[lo] * 2
+    r2_hi = (ratio[hi] - 0.5) * 2
+
+    rgba[lo, 0] = np.clip(34 + 221 * r2_lo, 0, 255).astype(np.uint8)
+    rgba[lo, 1] = np.clip(180 - 40 * r2_lo, 0, 255).astype(np.uint8)
+    rgba[lo, 2] = np.clip(34 - 30 * r2_lo, 0, 255).astype(np.uint8)
+    rgba[lo, 3] = 180
+
+    rgba[hi, 0] = np.clip(255 - 35 * r2_hi, 0, 255).astype(np.uint8)
+    rgba[hi, 1] = np.clip(140 - 120 * r2_hi, 0, 255).astype(np.uint8)
+    rgba[hi, 2] = np.clip(4 + 30 * r2_hi, 0, 255).astype(np.uint8)
+    rgba[hi, 3] = 180
+
+    del ratio  # free immediately
+
+    # Flip in-place for image orientation
+    rgba = rgba[::-1]
 
     from PIL import Image
-    img = Image.fromarray(rgba_flipped, "RGBA")
+    img = Image.fromarray(rgba, "RGBA")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
+    del rgba, img
     buf.seek(0)
     img_b64 = base64.b64encode(buf.read()).decode()
+    del buf
 
     m = folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
     folium.raster_layers.ImageOverlay(
@@ -580,10 +526,9 @@ if view_mode == "Gradient":
         interactive=False,
     ).add_to(m)
 
-    if use_feeder and feeder_operators:
-        caption = f"Time to nearest {dest_str} stop via {feeder_str} (min)"
-    else:
-        caption = f"Time to nearest {dest_str} stop by {transport_mode} (min)"
+    caption = (f"Time to nearest {dest_str} stop via {feeder_str} (min)"
+               if use_feeder and feeder_operators
+               else f"Time to nearest {dest_str} stop by {transport_mode} (min)")
 
     cmap = cm.LinearColormap(
         colors=["#22b422", "#ffcc00", "#dd2020"],
@@ -606,7 +551,7 @@ if view_mode == "Gradient":
         col.metric(f"<= {t} min", f"{pct:.0f}%")
 
     st.caption(
-        f"Median time: **{np.median(valid_times):.1f} min** | "
+        f"Median: **{np.median(valid_times):.1f} min** | "
         f"Mean: **{np.mean(valid_times):.1f} min** | "
         f"95th pct: **{np.percentile(valid_times, 95):.1f} min**"
     )
@@ -616,49 +561,47 @@ if view_mode == "Gradient":
 elif view_mode == "Stations":
     m = folium.Map(location=[50.5, 4.35], zoom_start=8, tiles="cartodbpositron")
 
-    # Draw destination stops (larger, on top)
     for op in dest_operators:
-        op_stops = dest_stops[dest_stops["operator"] == op]
+        op_mask = dest_mask & (op_arr == op)
         color = OPERATOR_COLORS.get(op, "#333")
         layer = folium.FeatureGroup(name=f"{op} (destination)")
-        for _, row in op_stops.iterrows():
+        idxs = np.where(op_mask)[0]
+        for j in idxs:
             folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=4,
-                color=color, fill=True, fill_color=color,
+                location=[stop_data["lats"][j], stop_data["lons"][j]],
+                radius=4, color=color, fill=True, fill_color=color,
                 fill_opacity=0.7, weight=1,
-                tooltip=f"<b>{row['name']}</b> ({op}) — destination",
+                tooltip=f"<b>{stop_data['names'][j]}</b> ({op})",
             ).add_to(layer)
         layer.add_to(m)
 
-    # Draw feeder stops (smaller, below)
-    if use_feeder and not feeder_stops.empty:
+    if use_feeder:
         for op in feeder_operators:
-            op_stops = feeder_stops[feeder_stops["operator"] == op]
+            op_mask = feeder_mask & (op_arr == op)
             color = OPERATOR_COLORS.get(op, "#999")
             layer = folium.FeatureGroup(name=f"{op} (feeder)")
-            for _, row in op_stops.iterrows():
+            idxs = np.where(op_mask)[0]
+            for j in idxs:
                 folium.CircleMarker(
-                    location=[row["lat"], row["lon"]],
-                    radius=2,
-                    color=color, fill=True, fill_color=color,
+                    location=[stop_data["lats"][j], stop_data["lons"][j]],
+                    radius=2, color=color, fill=True, fill_color=color,
                     fill_opacity=0.4, weight=0.5,
-                    tooltip=f"<b>{row['name']}</b> ({op}) — feeder",
+                    tooltip=f"<b>{stop_data['names'][j]}</b> ({op})",
                 ).add_to(layer)
             layer.add_to(m)
 
     folium.LayerControl().add_to(m)
     st_folium(m, width="stretch", height=700, key="access_stations")
 
-    # Operator breakdown
     st.subheader("Stops per operator")
+    import pandas as pd
     rows = []
     for op in dest_operators:
         rows.append({"Operator": op, "Role": "Destination",
-                     "Active stops": int((dest_stops["operator"] == op).sum())})
+                     "Active stops": int((op_arr[dest_mask] == op).sum())})
     for op in feeder_operators:
         rows.append({"Operator": op, "Role": "Feeder",
-                     "Active stops": int((feeder_stops["operator"] == op).sum()) if not feeder_stops.empty else 0})
+                     "Active stops": int((op_arr[feeder_mask] == op).sum())})
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 render_footer()
