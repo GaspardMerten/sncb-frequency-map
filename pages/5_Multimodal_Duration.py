@@ -109,10 +109,10 @@ with st.sidebar:
 
 # ── Address input ────────────────────────────────────────────────────────────
 
-st.markdown("### 🗺️ Multimodal Travel Duration")
+st.markdown("### Multimodal Travel Duration")
 
 address_input = st.text_input(
-    "📍 Enter an address in Belgium",
+    "Enter an address in Belgium",
     placeholder="e.g. Grand Place 1, Bruxelles",
     help="Uses OpenStreetMap Nominatim for geocoding.",
 )
@@ -128,7 +128,7 @@ if not location:
     st.stop()
 
 origin_lat, origin_lon = location["lat"], location["lon"]
-st.success(f"📍 **{location['display_name']}** — ({origin_lat:.5f}, {origin_lon:.5f})")
+st.success(f"**{location['display_name']}** — ({origin_lat:.5f}, {origin_lon:.5f})")
 
 # ── Load GTFS data ───────────────────────────────────────────────────────────
 
@@ -143,7 +143,7 @@ def _load_multimodal_data(operators, ts, token, target_dates_, hour_filter,
     feeds = {}
     sids_per_op = {}
 
-    progress_bar = st.progress(0, text="Loading GTFS data…")
+    progress_bar = st.progress(0, text="Loading GTFS data...")
     n_ops = len(operators)
 
     for i, op_name in enumerate(operators):
@@ -153,25 +153,20 @@ def _load_multimodal_data(operators, ts, token, target_dates_, hour_filter,
 
         def _on_progress(downloaded, total, _base=base_pct, _step=step_pct):
             dl_ratio = min(downloaded / total, 1.0)
-            pct = _base + _step * dl_ratio * 0.8  # 80% download, 20% parse
+            pct = _base + _step * dl_ratio * 0.8
             progress_bar.progress(
                 min(pct, 1.0),
-                text=f"Downloading {op_name}… {downloaded / 1e6:.0f} / {total / 1e6:.0f} MB",
+                text=f"Downloading {op_name}... {downloaded / 1e6:.0f} / {total / 1e6:.0f} MB",
             )
 
         try:
-            progress_bar.progress(
-                base_pct, text=f"Downloading {op_name}…",
-            )
+            progress_bar.progress(base_pct, text=f"Downloading {op_name}...")
             feed = fetch_gtfs_operator(slug, ts, token, progress_cb=_on_progress)
         except Exception as e:
             st.warning(f"Could not load {op_name}: {e}")
             continue
 
-        progress_bar.progress(
-            base_pct + step_pct * 0.9,
-            text=f"Parsing {op_name} GTFS…",
-        )
+        progress_bar.progress(base_pct + step_pct * 0.9, text=f"Parsing {op_name} GTFS...")
 
         if feed.stop_times is None or feed.trips is None:
             st.warning(f"{op_name} GTFS data incomplete, skipping.")
@@ -189,11 +184,11 @@ def _load_multimodal_data(operators, ts, token, target_dates_, hour_filter,
         progress_bar.empty()
         return None
 
-    progress_bar.progress(0.92, text="Building stop lookup…")
+    progress_bar.progress(0.92, text="Building stop lookup...")
     stop_lookup = build_multimodal_stop_lookup(feeds)
-    progress_bar.progress(0.95, text="Building timetable graph…")
+    progress_bar.progress(0.95, text="Building timetable graph...")
     graph = build_multimodal_graph(feeds, sids_per_op, hour_filter)
-    progress_bar.progress(0.98, text="Building transfer edges…")
+    progress_bar.progress(0.98, text="Building transfer edges...")
     transfers = build_transfer_edges(stop_lookup, max_walk_km=transfer_dist_km)
     progress_bar.progress(1.0, text="Done!")
     progress_bar.empty()
@@ -255,49 +250,37 @@ reachable = _compute_travel_times(
     date_key=target_date,
 )
 
-# ── Build results DataFrame ──────────────────────────────────────────────────
+# ── Build results DataFrame (single pass, no redundant copies) ───────────────
 
 prov_geo = load_provinces_geojson()
 
+rows = []
+for sid, info in stop_lookup.items():
+    if sid in reachable:
+        r = reachable[sid]
+        tt, tr, wt = r["travel_time"], r["transfers"], r["walk_time"]
+    else:
+        tt, tr, wt = None, None, None
 
-def _build_result_df():
-    rows = []
-    for sid, info in stop_lookup.items():
-        if sid in reachable:
-            r = reachable[sid]
-            tt = r["travel_time"]
-            tr = r["transfers"]
-            wt = r["walk_time"]
-        else:
-            tt, tr, wt = None, None, None
+    province = get_province(info["lat"], info["lon"], prov_geo)
+    region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
 
-        province = get_province(info["lat"], info["lon"], prov_geo)
-        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
+    rows.append({
+        "station_id": sid, "station_name": info["name"],
+        "operator": info["operator"],
+        "lat": info["lat"], "lon": info["lon"],
+        "province": province or "Unknown", "region": region,
+        "travel_time": tt, "transfers": tr, "walk_time": wt,
+    })
 
-        rows.append({
-            "station_id": sid,
-            "station_name": info["name"],
-            "operator": info["operator"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "province": province or "Unknown",
-            "region": region,
-            "travel_time": tt,
-            "transfers": tr,
-            "walk_time": wt,
-        })
-    return pd.DataFrame(rows)
+df = pd.DataFrame(rows)
+del rows
 
+# Use boolean masks instead of separate DataFrame copies
+is_display = df["operator"].isin(display_operators) if display_operators else pd.Series(True, index=df.index)
+has_time = df["travel_time"].notna()
 
-df = _build_result_df()
-# Filter for display (routing uses all operators)
-df_display = df[df["operator"].isin(display_operators)] if display_operators else df
-df_ok = df_display[df_display["travel_time"].notna()]
-df_na = df_display[df_display["travel_time"].isna()]
-
-# Full stats (all operators)
-df_ok_all = df[df["travel_time"].notna()]
-
+df_ok_all = df[has_time]
 if df_ok_all.empty:
     st.warning("No stops reachable from this address with the current settings. "
                "Try increasing the time budget or walking distance.")
@@ -313,7 +296,7 @@ st.caption(
     f"— {ops_str}"
 )
 
-with st.expander("ℹ️ How is this computed?"):
+with st.expander("How is this computed?"):
     st.markdown(f"""
 **Door-to-door multimodal travel time**
 
@@ -338,7 +321,7 @@ transit stop in Belgium, combining **walking** + **public transit** from multipl
 - *Gradient*: continuous heatmap. Total time = transit to nearest stop + first/last-mile distance at selected speed.
     """)
 
-# Metrics (computed on all operators, not just displayed ones)
+# Metrics (computed on all operators)
 n_reachable = len(df_ok_all)
 ops_reachable = df_ok_all["operator"].nunique()
 avg_time = df_ok_all["travel_time"].mean()
@@ -366,24 +349,32 @@ for col, op in zip(op_cols, data["operators_loaded"]):
                 delta_color="off",
             )
 
-# ── Map rendering ────────────────────────────────────────────────────────────
+# ── Map rendering (use filtered views only when needed) ─────────────────────
 
-global_max_time = df_ok["travel_time"].max()
+# Display-filtered reachable stops
+df_display = df[is_display & has_time]
+global_max_time = df_display["travel_time"].max() if not df_display.empty else 1
 
 if view_mode == "Stations":
     m = folium.Map(location=[origin_lat, origin_lon], zoom_start=11,
                    tiles="cartodbpositron")
 
-    # Origin marker
     folium.Marker(
         location=[origin_lat, origin_lon],
         popup=f"<b>{location['display_name'][:80]}</b>",
-        tooltip="📍 Origin",
+        tooltip="Origin",
         icon=folium.Icon(color="red", icon="home", prefix="fa"),
     ).add_to(m)
 
-    # Reachable stops
-    for _, row in df_ok.iterrows():
+    df_na = df[is_display & ~has_time]
+    for _, row in df_na.iterrows():
+        folium.CircleMarker(
+            location=[row["lat"], row["lon"]],
+            radius=2, color="#ccc", fill=True, fill_color="#ccc",
+            fill_opacity=0.3, weight=0.5,
+        ).add_to(m)
+
+    for _, row in df_display.iterrows():
         t = row["travel_time"]
         ratio = t / global_max_time if global_max_time > 0 else 0
         radius = 3 + 8 * (1 - ratio)
@@ -402,7 +393,6 @@ if view_mode == "Stations":
             ),
         ).add_to(m)
 
-    # Walking radius circle
     folium.Circle(
         location=[origin_lat, origin_lon],
         radius=max_walk * 1000,
@@ -412,20 +402,20 @@ if view_mode == "Stations":
 
     st_folium(m, width="stretch", height=650, key="mm_station_map")
 
-    # Data table
     with st.expander("Stop data"):
-        display = df_ok[["station_name", "operator", "travel_time", "walk_time",
-                         "transfers", "province"]].copy()
-        display.columns = ["Stop", "Operator", "Total (min)", "Walking (min)",
-                           "Transfers", "Province"]
         st.dataframe(
-            display.sort_values("Total (min)").reset_index(drop=True),
+            df_display[["station_name", "operator", "travel_time", "walk_time",
+                        "transfers", "province"]].rename(columns={
+                "station_name": "Stop", "operator": "Operator",
+                "travel_time": "Total (min)", "walk_time": "Walking (min)",
+                "transfers": "Transfers", "province": "Province",
+            }).sort_values("Total (min)").reset_index(drop=True),
             width="stretch", height=400,
         )
 
 elif view_mode == "Provinces":
     st.markdown("Average travel time per province (reachable stops only).")
-    prov_agg = df_ok.groupby("province").agg(
+    prov_agg = df_display.groupby("province").agg(
         avg_time=("travel_time", "mean"),
         stop_count=("station_id", "count"),
     ).round(1).sort_values("avg_time")
@@ -438,18 +428,17 @@ elif view_mode == "Provinces":
             prov_geo["features"], prov_totals, pcmap, "name",
             lambda n, t: f"{n}: {t:.0f} min avg ({prov_agg.loc[n, 'stop_count'] if n in prov_agg.index else 0} stops)",
         )
-        # Add origin marker
         folium.Marker(
             location=[origin_lat, origin_lon],
             icon=folium.Icon(color="red", icon="home", prefix="fa"),
-            tooltip="📍 Origin",
+            tooltip="Origin",
         ).add_to(pm)
         st_folium(pm, width="stretch", height=650, key="mm_prov_map")
     st.dataframe(prov_agg, width="stretch")
 
 elif view_mode == "Regions":
     st.markdown("Average travel time by region.")
-    region_agg = df_ok.groupby("region").agg(
+    region_agg = df_display.groupby("region").agg(
         avg_time=("travel_time", "mean"),
         stop_count=("station_id", "count"),
     ).round(1).sort_values("avg_time")
@@ -461,7 +450,7 @@ elif view_mode == "Regions":
                 st.metric(reg, f"{region_agg.loc[reg, 'avg_time']:.0f} min")
                 st.caption(f"{int(region_agg.loc[reg, 'stop_count'])} stops")
             else:
-                st.metric(reg, "—")
+                st.metric(reg, "---")
 
     region_geo = build_region_geojson(prov_geo)
     region_totals = region_agg["avg_time"].to_dict()
@@ -475,7 +464,7 @@ elif view_mode == "Regions":
         folium.Marker(
             location=[origin_lat, origin_lon],
             icon=folium.Icon(color="red", icon="home", prefix="fa"),
-            tooltip="📍 Origin",
+            tooltip="Origin",
         ).add_to(rm)
         st_folium(rm, width="stretch", height=650, key="mm_region_map")
     st.dataframe(region_agg, width="stretch")
@@ -485,11 +474,10 @@ elif view_mode == "Gradient":
     st.markdown(f"Continuous heatmap: transit time to nearest reachable stop + {mile_kind}-mile distance.")
     gm = render_gradient_map(df, global_max_time, transport_mode, prov_geo,
                              mile_kind=mile_kind)
-    # Add origin marker
     folium.Marker(
         location=[origin_lat, origin_lon],
         icon=folium.Icon(color="red", icon="home", prefix="fa"),
-        tooltip="📍 Origin",
+        tooltip="Origin",
     ).add_to(gm)
     st_folium(gm, width="stretch", height=650, key="mm_gradient_map")
 

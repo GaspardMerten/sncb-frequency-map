@@ -1,10 +1,11 @@
 """Problematic Trains dashboard.
 
-Per (relation, station) analysis: which stations consistently see late trains
-for a given relation? Drill into day-by-day reliability and delay trends.
+Per (train_no, station) analysis: which specific trains are consistently late
+at specific stations? Processes each day incrementally to minimize memory.
 """
 
 import os
+from collections import defaultdict
 from datetime import date, timedelta
 
 import numpy as np
@@ -15,7 +16,7 @@ import plotly.express as px
 from dotenv import load_dotenv
 
 from logic.shared import CUSTOM_CSS, render_footer, noon_timestamp
-from logic.api import fetch_punctuality_range
+from logic.api import fetch_punctuality
 
 load_dotenv()
 
@@ -57,7 +58,7 @@ with st.sidebar:
     late_threshold_min = st.number_input("Late threshold (min)", value=5.0, step=1.0,
                                          help="A stop is 'late' if its departure delay exceeds this.")
     min_days = st.slider("Min days observed", 1, min(14, n_days), min(3, n_days),
-                         help="Exclude (relation, station) pairs seen on fewer days.")
+                         help="Exclude (train, station) pairs seen on fewer days.")
 
     st.markdown('<hr class="sidebar-divider"/>', unsafe_allow_html=True)
     st.markdown('<p class="sidebar-section">Delay range</p>', unsafe_allow_html=True)
@@ -83,117 +84,181 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ── Load data ────────────────────────────────────────────────────────────────
+# ── Incremental processing ───────────────────────────────────────────────────
 
 all_dates = [start_date + timedelta(days=i) for i in range(n_days)]
-
-cache_key = (tuple(all_dates), token)
-if st.session_state.get("_prob_raw_key") == cache_key:
-    df = st.session_state["_prob_raw"]
-else:
-    progress = st.progress(0, text="Loading punctuality data...")
-
-    def _on_progress(i, total, d):
-        progress.progress(i / max(total, 1),
-                          text=f"Fetching {d.strftime('%d %b %Y')} ({i+1}/{total})...")
-
-    records = fetch_punctuality_range(all_dates, token, progress_cb=_on_progress)
-    progress.progress(1.0, text="Done!")
-    progress.empty()
-
-    if not records:
-        st.warning("No punctuality data for the selected range.")
-        st.stop()
-
-    df = pd.DataFrame(records)
-    st.session_state["_prob_raw_key"] = cache_key
-    st.session_state["_prob_raw"] = df
-
-# Operator + relation filters
-available_operators = sorted(df["train_serv"].dropna().unique())
-with operator_placeholder:
-    selected_operators = st.multiselect(
-        "Operators", available_operators, default=available_operators,
-        key="prob_ops",
-    )
-if selected_operators:
-    df = df[df["train_serv"].isin(selected_operators)]
-
-available_relations = sorted(df["relation"].dropna().unique())
-with relation_placeholder:
-    selected_relations = st.multiselect(
-        "Relations", available_relations, default=[],
-        key="prob_rels",
-        help="Leave empty for all.",
-    )
-if selected_relations:
-    df = df[df["relation"].isin(selected_relations)]
-
-if df.empty:
-    st.warning("No data after filters.")
-    st.stop()
-
-# ── Compute per (relation, station) stats ────────────────────────────────────
-
 late_threshold_sec = late_threshold_min * 60
 delay_floor_sec = delay_floor * 60
 delay_cap_sec = delay_cap * 60
 
-
-@st.cache_data(show_spinner="Analysing reliability per station...", ttl=3600)
-def _compute_station_stats(records, threshold_sec, min_d,
-                           floor_sec, cap_sec, exclude):
-    df = pd.DataFrame(records)
-    df["delay_dep_sec"] = pd.to_numeric(df["delay_dep"], errors="coerce")
-    df["station"] = df["ptcar_lg_nm_nl"].str.strip().str.upper()
-    df = df.dropna(subset=["delay_dep_sec"])
-
-    # Delay range filter
-    if exclude:
-        df = df[(df["delay_dep_sec"] >= floor_sec) & (df["delay_dep_sec"] <= cap_sec)]
-    else:
-        df["delay_dep_sec"] = df["delay_dep_sec"].where(
-            df["delay_dep_sec"] >= floor_sec, 0.0)
-        df["delay_dep_sec"] = df["delay_dep_sec"].clip(upper=cap_sec)
-
-    if df.empty:
-        return pd.DataFrame()
-
-    df["delay_dep_min"] = df["delay_dep_sec"] / 60.0
-    df["is_late"] = df["delay_dep_sec"] > threshold_sec
-
-    # Per (relation, station, date): aggregate across trains
-    day_agg = df.groupby(["relation", "station", "datdep"], sort=False).agg(
-        avg_delay_min=("delay_dep_min", "mean"),
-        max_delay_min=("delay_dep_min", "max"),
-        n_trains=("train_no", "nunique"),
-        n_late=("is_late", "sum"),
-        n_total=("is_late", "count"),
-    ).reset_index()
-
-    day_agg["pct_late"] = day_agg["n_late"] / day_agg["n_total"] * 100
-
-    # Across days
-    stats = day_agg.groupby(["relation", "station"], sort=False).agg(
-        n_days=("datdep", "nunique"),
-        avg_delay_min=("avg_delay_min", "mean"),
-        avg_max_delay_min=("max_delay_min", "mean"),
-        worst_day_delay_min=("max_delay_min", "max"),
-        avg_pct_late=("pct_late", "mean"),
-        total_trains=("n_trains", "sum"),
-    ).reset_index()
-
-    stats = stats[stats["n_days"] >= min_d]
-    return stats.round(1)
-
-
-stats = _compute_station_stats(
-    df.to_dict("records"), late_threshold_sec, min_days,
-    delay_floor_sec, delay_cap_sec, exclude_outliers,
+cache_key = (
+    tuple(all_dates), token, delay_floor_sec, delay_cap_sec, exclude_outliers,
 )
 
+if st.session_state.get("_prob_agg_key") == cache_key:
+    stats = st.session_state["_prob_stats"]
+    detail_cache = st.session_state["_prob_detail"]
+    all_operators_found = st.session_state["_prob_operators"]
+    all_relations_found = st.session_state["_prob_relations"]
+else:
+    progress = st.progress(0, text="Loading and processing...")
+
+    # Accumulators keyed by (train_no, station)
+    # Per day: sum of delays, max delay, count, late count
+    # We key the inner dict by datdep to count unique days
+    pair_days = defaultdict(lambda: defaultdict(lambda: {
+        "sum": 0.0, "max": 0.0, "n": 0, "n_late": 0,
+    }))
+    pair_meta = {}  # (train_no, station) -> {relation, operator}
+    operators_seen = set()
+    relations_seen = set()
+
+    for i, d in enumerate(all_dates):
+        progress.progress(i / n_days,
+                          text=f"Processing {d.strftime('%d %b %Y')} ({i+1}/{n_days})...")
+        ts = noon_timestamp(d.year, d.month, d.day)
+        try:
+            records = fetch_punctuality(ts, token)
+        except Exception:
+            continue
+        if not records:
+            continue
+
+        # Process in numpy for speed
+        df = pd.DataFrame(records)
+        delays = pd.to_numeric(df["delay_dep"], errors="coerce")
+        valid = delays.notna()
+        df = df[valid.values]
+        delays = delays[valid.values].values.astype(np.float64)
+        del records
+
+        if len(df) == 0:
+            continue
+
+        # Delay range
+        if exclude_outliers:
+            keep = (delays >= delay_floor_sec) & (delays <= delay_cap_sec)
+            df = df[keep]
+            delays = delays[keep]
+        else:
+            delays = np.where(delays >= delay_floor_sec, delays, 0.0)
+            np.clip(delays, None, delay_cap_sec, out=delays)
+
+        if len(df) == 0:
+            continue
+
+        stations = df["ptcar_lg_nm_nl"].str.strip().str.upper().values
+        train_nos = df["train_no"].values
+        relations = df["relation"].values
+        operators = df["train_serv"].values
+        datdep = str(d)
+
+        for j in range(len(df)):
+            key = (train_nos[j], stations[j])
+            day_agg = pair_days[key][datdep]
+            day_agg["sum"] += delays[j]
+            if delays[j] > day_agg["max"]:
+                day_agg["max"] = delays[j]
+            day_agg["n"] += 1
+            if delays[j] > late_threshold_sec:
+                day_agg["n_late"] += 1
+
+            if key not in pair_meta:
+                pair_meta[key] = {"relation": relations[j], "operator": operators[j]}
+
+            operators_seen.add(operators[j])
+            relations_seen.add(relations[j])
+
+        del df, delays
+
+    progress.progress(0.95, text="Aggregating...")
+
+    all_operators_found = sorted(operators_seen)
+    all_relations_found = sorted(relations_seen)
+
+    # Build stats from accumulators
+    rows = []
+    detail_cache = {}
+    for (train_no, station), days_dict in pair_days.items():
+        nd = len(days_dict)
+        total_sum = 0.0
+        total_max_sum = 0.0
+        total_pct_sum = 0.0
+        worst_day = 0.0
+        total_stops = 0
+        day_details = {}
+
+        for datdep, agg in days_dict.items():
+            avg_d = agg["sum"] / max(agg["n"], 1)
+            total_sum += avg_d
+            total_max_sum += agg["max"]
+            pct = agg["n_late"] / max(agg["n"], 1) * 100
+            total_pct_sum += pct
+            if agg["max"] > worst_day:
+                worst_day = agg["max"]
+            total_stops += agg["n"]
+            day_details[datdep] = {
+                "avg": round(avg_d / 60, 1),
+                "max": round(agg["max"] / 60, 1),
+                "n": agg["n"],
+                "pct_late": round(pct, 1),
+            }
+
+        meta = pair_meta.get((train_no, station), {})
+        rows.append({
+            "train_no": train_no,
+            "station": station,
+            "relation": meta.get("relation", "?"),
+            "operator": meta.get("operator", "?"),
+            "n_days": nd,
+            "avg_delay_min": round(total_sum / nd / 60, 1),
+            "avg_max_delay_min": round(total_max_sum / nd / 60, 1),
+            "worst_day_delay_min": round(worst_day / 60, 1),
+            "avg_pct_late": round(total_pct_sum / nd, 1),
+            "total_stops": total_stops,
+        })
+        detail_cache[(train_no, station)] = day_details
+
+    del pair_days, pair_meta
+
+    stats = pd.DataFrame(rows) if rows else pd.DataFrame()
+    del rows
+
+    progress.empty()
+
+    st.session_state["_prob_agg_key"] = cache_key
+    st.session_state["_prob_stats"] = stats
+    st.session_state["_prob_detail"] = detail_cache
+    st.session_state["_prob_operators"] = all_operators_found
+    st.session_state["_prob_relations"] = all_relations_found
+
+# Filters
+with operator_placeholder:
+    selected_operators = st.multiselect(
+        "Operators", all_operators_found, default=all_operators_found,
+        key="prob_ops",
+    )
+
+with relation_placeholder:
+    selected_relations = st.multiselect(
+        "Relations", all_relations_found, default=[],
+        key="prob_rels",
+        help="Leave empty for all.",
+    )
+
 if stats.empty:
-    st.warning("No (relation, station) pairs meet the minimum days threshold.")
+    st.warning("No data found.")
+    st.stop()
+
+filtered = stats.copy()
+if selected_operators:
+    filtered = filtered[filtered["operator"].isin(selected_operators)]
+if selected_relations:
+    filtered = filtered[filtered["relation"].isin(selected_relations)]
+filtered = filtered[filtered["n_days"] >= min_days]
+
+if filtered.empty:
+    st.warning("No (train, station) pairs meet the filters.")
     st.stop()
 
 # ── Header ───────────────────────────────────────────────────────────────────
@@ -206,46 +271,42 @@ st.caption(
 
 with st.expander("How is this computed?"):
     st.markdown(f"""
-**Goal**: Find (relation, station) pairs where trains are consistently late.
+**Goal**: Find specific trains that are consistently late at specific stations.
 
-**Algorithm**:
-1. Punctuality data is fetched for each day in the range ({n_days} days).
-2. For each (relation, station, date): average delay, max delay, and % of late stops are computed.
-3. A stop is "late" if its departure delay exceeds **{late_threshold_min} min**.
-4. Statistics are aggregated across days.
-5. Only pairs observed on at least **{min_days}** days are shown.
+**Method**: Each day is processed individually. For each (train number, station, date):
+average delay and % late stops are computed. Statistics are then aggregated across days
+for each (train, station) pair.
 
-**Delay range** ({delay_floor}–{delay_cap} min):
-- *Exclude OFF*: below-min clamped to 0, above-max clamped to max.
-- *Exclude ON*: records outside range dropped.
+A stop is "late" if departure delay exceeds **{late_threshold_min} min**.
+Only pairs observed on at least **{min_days}** days are shown.
+This reveals, for example, that train 2432 is late at Liege-Guillemins 80% of days.
 """)
 
 # Metrics
-n_pairs = len(stats)
-n_problem = (stats["avg_pct_late"] > 50).sum()
-avg_delay = stats["avg_delay_min"].mean()
-worst_station = stats.nlargest(1, "avg_pct_late").iloc[0]["station"] if not stats.empty else "N/A"
+n_pairs = len(filtered)
+n_problem = (filtered["avg_pct_late"] > 50).sum()
+avg_delay = filtered["avg_delay_min"].mean()
+worst = filtered.nlargest(1, "avg_pct_late").iloc[0]
+worst_label = f"{worst['train_no']}@{worst['station']}"
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Station-relation pairs", n_pairs)
-c2.metric("Late >50% of days", n_problem)
+c1.metric("Train-station pairs", n_pairs)
+c2.metric("Late >50%", n_problem)
 c3.metric("Avg delay", f"{avg_delay:.1f} min")
-c4.metric("Worst station", worst_station)
+c4.metric("Worst pair", worst_label)
 
 # ── Scatter plot ─────────────────────────────────────────────────────────────
 
 fig_scatter = px.scatter(
-    stats,
-    x="avg_pct_late",
-    y="avg_delay_min",
-    color="relation",
-    size="total_trains",
-    hover_data=["station", "n_days", "worst_day_delay_min"],
+    filtered,
+    x="avg_pct_late", y="avg_delay_min",
+    color="relation", size="total_stops",
+    hover_data=["train_no", "station", "operator", "n_days", "worst_day_delay_min"],
     labels={
-        "avg_pct_late": "Avg % Stops Late",
+        "avg_pct_late": "Avg % Late",
         "avg_delay_min": "Avg Delay (min)",
         "relation": "Relation",
-        "total_trains": "Total Trains",
+        "total_stops": "Total Stops",
     },
     height=400,
 )
@@ -255,116 +316,83 @@ fig_scatter.update_layout(
 )
 st.plotly_chart(fig_scatter, use_container_width=True)
 
-# ── Sortable table ───────────────────────────────────────────────────────────
+# ── Table ────────────────────────────────────────────────────────────────────
 
-st.subheader("All station-relation pairs")
-display = stats.sort_values("avg_pct_late", ascending=False)[
-    ["relation", "station", "n_days", "avg_pct_late", "avg_delay_min",
-     "avg_max_delay_min", "worst_day_delay_min", "total_trains"]
-].copy()
-display.columns = ["Relation", "Station", "Days", "Avg % Late",
-                   "Avg Delay (min)", "Avg Max Delay (min)",
-                   "Worst Day (min)", "Total Trains"]
-display = display.reset_index(drop=True)
-display.index = display.index + 1
-st.dataframe(display, width="stretch", height=400)
+st.subheader("All train-station pairs")
+display = filtered.sort_values("avg_pct_late", ascending=False)[
+    ["train_no", "station", "relation", "operator", "n_days", "avg_pct_late",
+     "avg_delay_min", "avg_max_delay_min", "worst_day_delay_min", "total_stops"]
+]
+display.columns = ["Train", "Station", "Relation", "Operator", "Days", "Avg % Late",
+                   "Avg Delay (min)", "Avg Max (min)", "Worst Day (min)", "Total Stops"]
+st.dataframe(display.reset_index(drop=True), width="stretch", height=400)
 
-# ── Detail view for selected (relation, station) ────────────────────────────
+# ── Detail view ──────────────────────────────────────────────────────────────
 
-st.subheader("Station detail")
+st.subheader("Detail")
 
 detail_options = [
-    f"{row['relation']} @ {row['station']} — {row['avg_pct_late']:.0f}% late"
-    for _, row in stats.sort_values("avg_pct_late", ascending=False).head(200).iterrows()
+    f"Train {row['train_no']} @ {row['station']} ({row['relation']}) — {row['avg_pct_late']:.0f}% late"
+    for _, row in filtered.sort_values("avg_pct_late", ascending=False).head(200).iterrows()
 ]
 detail_map = {
-    opt: (row["relation"], row["station"])
+    opt: (row["train_no"], row["station"])
     for opt, (_, row) in zip(
         detail_options,
-        stats.sort_values("avg_pct_late", ascending=False).head(200).iterrows(),
+        filtered.sort_values("avg_pct_late", ascending=False).head(200).iterrows(),
     )
 }
 
 if not detail_options:
     st.info("No pairs to display.")
 else:
-    selected_label = st.selectbox("Select a (relation, station) pair", detail_options)
-    sel_relation, sel_station = detail_map[selected_label]
+    selected_label = st.selectbox("Select a (train, station) pair", detail_options)
+    sel_train, sel_station = detail_map[selected_label]
 
-    # Filter raw data
-    detail_raw = df[
-        (df["relation"] == sel_relation) &
-        (df["ptcar_lg_nm_nl"].str.strip().str.upper() == sel_station)
-    ].copy()
-    detail_raw["delay_dep_sec"] = pd.to_numeric(detail_raw["delay_dep"], errors="coerce")
-    detail_raw = detail_raw.dropna(subset=["delay_dep_sec"])
+    day_details = detail_cache.get((sel_train, sel_station), {})
 
-    # Apply delay range
-    if exclude_outliers:
-        detail_raw = detail_raw[
-            (detail_raw["delay_dep_sec"] >= delay_floor_sec) &
-            (detail_raw["delay_dep_sec"] <= delay_cap_sec)
+    if not day_details:
+        st.warning("No detail data for this pair.")
+    else:
+        day_rows = [
+            {"date": d, **v}
+            for d, v in sorted(day_details.items())
         ]
-    else:
-        detail_raw["delay_dep_sec"] = detail_raw["delay_dep_sec"].where(
-            detail_raw["delay_dep_sec"] >= delay_floor_sec, 0.0)
-        detail_raw["delay_dep_sec"] = detail_raw["delay_dep_sec"].clip(upper=delay_cap_sec)
-
-    detail_raw["delay_dep_min"] = detail_raw["delay_dep_sec"] / 60.0
-
-    if detail_raw.empty:
-        st.warning("No data for this pair.")
-    else:
-        # Day-by-day chart
-        day_detail = detail_raw.groupby("datdep").agg(
-            avg_delay_min=("delay_dep_min", "mean"),
-            max_delay_min=("delay_dep_min", "max"),
-            n_trains=("train_no", "nunique"),
-            pct_late=("delay_dep_sec", lambda x: (x > late_threshold_sec).mean() * 100),
-        ).reset_index().sort_values("datdep")
+        day_df = pd.DataFrame(day_rows)
 
         fig_day = go.Figure()
         fig_day.add_trace(go.Bar(
-            x=day_detail["datdep"],
-            y=day_detail["avg_delay_min"],
-            name="Avg delay",
+            x=day_df["date"],
+            y=day_df["avg"],
             marker_color=[
                 "#22b422" if v <= 0 else
                 "#ffcc00" if v <= late_threshold_min else
                 "#dd2020"
-                for v in day_detail["avg_delay_min"]
+                for v in day_df["avg"]
             ],
             hovertext=[
-                f"{d}<br>Avg: {a:.1f} min<br>Max: {m:.1f} min<br>"
-                f"Trains: {int(n)}<br>Late: {p:.0f}%"
+                f"{d}<br>Avg: {a} min<br>Max: {m} min<br>Stops: {n}<br>Late: {p}%"
                 for d, a, m, n, p in zip(
-                    day_detail["datdep"], day_detail["avg_delay_min"],
-                    day_detail["max_delay_min"], day_detail["n_trains"],
-                    day_detail["pct_late"],
+                    day_df["date"], day_df["avg"], day_df["max"],
+                    day_df["n"], day_df["pct_late"],
                 )
             ],
             hoverinfo="text",
         ))
-        fig_day.add_hline(y=late_threshold_min, line_dash="dash", line_color="#dd2020",
+        fig_day.add_hline(y=late_threshold_min, line_dash="dash",
+                          line_color="#dd2020",
                           annotation_text=f"Late ({late_threshold_min} min)")
         fig_day.update_layout(
-            xaxis_title="Date",
-            yaxis_title="Avg delay (min)",
-            height=300,
-            margin=dict(t=10, b=40),
+            xaxis_title="Date", yaxis_title="Avg delay (min)",
+            height=300, margin=dict(t=10, b=40),
         )
         st.plotly_chart(fig_day, use_container_width=True)
 
-        # Per-train breakdown at this station
-        train_breakdown = detail_raw.groupby("train_no").agg(
-            n_days=("datdep", "nunique"),
-            avg_delay_min=("delay_dep_min", "mean"),
-            max_delay_min=("delay_dep_min", "max"),
-        ).round(1).sort_values("avg_delay_min", ascending=False)
-        train_breakdown.columns = ["Days", "Avg Delay (min)", "Max Delay (min)"]
-        train_breakdown.index.name = "Train"
-
-        with st.expander(f"Train breakdown at {sel_station}"):
-            st.dataframe(train_breakdown, width="stretch")
+        with st.expander("Day-by-day data"):
+            show_df = day_df.rename(columns={
+                "date": "Date", "avg": "Avg Delay (min)", "max": "Max Delay (min)",
+                "n": "Stops", "pct_late": "% Late",
+            })
+            st.dataframe(show_df, width="stretch", hide_index=True)
 
 render_footer()

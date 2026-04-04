@@ -2,10 +2,12 @@
 
 Identifies stations and segments where delays are introduced by comparing
 consecutive stops along each train journey across multiple days.
+Processes each day incrementally to avoid holding all raw data in memory.
 """
 
 import os
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -16,7 +18,7 @@ import branca.colormap as cm
 from dotenv import load_dotenv
 
 from logic.shared import CUSTOM_CSS, render_footer, noon_timestamp
-from logic.api import fetch_punctuality_range, fetch_operational_points
+from logic.api import fetch_punctuality, fetch_operational_points
 
 load_dotenv()
 
@@ -70,12 +72,10 @@ with st.sidebar:
     col_min, col_max = st.columns(2)
     with col_min:
         delay_floor = st.number_input("Min delay (min)", value=0.0, step=1.0,
-                                      key="prop_floor",
-                                      help="Threshold for small delays.")
+                                      key="prop_floor")
     with col_max:
         delay_cap = st.number_input("Max delay (min)", value=30.0, step=1.0,
-                                    key="prop_cap",
-                                    help="Threshold for large delays.")
+                                    key="prop_cap")
     exclude_outliers = st.toggle(
         "Exclude out-of-range", value=False, key="prop_excl",
         help="**ON**: drop records outside [min, max]. "
@@ -90,44 +90,207 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ── Load data ────────────────────────────────────────────────────────────────
+# ── Incremental data loading + processing ────────────────────────────────────
 
 all_dates = [start_date + timedelta(days=i) for i in range(n_days)]
+delay_floor_sec = delay_floor * 60
+delay_cap_sec = delay_cap * 60
 
-cache_key = (tuple(all_dates), token)
-if st.session_state.get("_prop_raw_key") == cache_key:
-    df = st.session_state["_prop_raw"]
-else:
-    progress = st.progress(0, text="Loading punctuality data...")
 
-    def _on_progress(i, total, d):
-        progress.progress(i / max(total, 1),
-                          text=f"Fetching {d.strftime('%d %b %Y')} ({i+1}/{total})...")
-
-    records = fetch_punctuality_range(all_dates, token, progress_cb=_on_progress)
-    progress.progress(1.0, text="Done!")
-    progress.empty()
-
+def _process_day(records, datdep_str, threshold, h_start, h_end,
+                 floor_sec, cap_sec, exclude):
+    """Process one day's records into propagation events. Returns list of tuples."""
     if not records:
-        st.warning("No punctuality data for the selected range.")
-        st.stop()
+        return []
 
     df = pd.DataFrame(records)
-    st.session_state["_prop_raw_key"] = cache_key
-    st.session_state["_prop_raw"] = df
+    df["delay_dep_sec"] = pd.to_numeric(df["delay_dep"], errors="coerce")
+    df = df.dropna(subset=["delay_dep_sec"])
 
-# Operator filter
-available_operators = sorted(df["train_serv"].dropna().unique())
+    # Parse hour for filtering
+    hours = pd.to_numeric(
+        df["planned_time_dep"].astype(str).str.split(":").str[0], errors="coerce"
+    ).fillna(-1).astype(int)
+    minutes = pd.to_numeric(
+        df["planned_time_dep"].astype(str).str.split(":").str[1], errors="coerce"
+    ).fillna(0).astype(int)
+
+    mask = (hours >= h_start) & (hours < h_end)
+    df = df[mask.values]
+    dep_total = (hours[mask] * 60 + minutes[mask]).values
+
+    if df.empty:
+        return []
+
+    # Delay range
+    delays = df["delay_dep_sec"].values.copy()
+    if exclude:
+        keep = (delays >= floor_sec) & (delays <= cap_sec)
+        df = df[keep]
+        delays = delays[keep]
+        dep_total = dep_total[keep]
+    else:
+        delays = np.where(delays >= floor_sec, delays, 0.0)
+        np.clip(delays, None, cap_sec, out=delays)
+
+    if len(df) == 0:
+        return []
+
+    stations = df["ptcar_lg_nm_nl"].str.strip().str.upper().values
+    train_nos = df["train_no"].values
+    relations = df["relation"].values
+    train_serv = df["train_serv"].values
+
+    # Sort by (train_no, dep_total) using numpy argsort
+    order = np.lexsort((dep_total, train_nos))
+    stations = stations[order]
+    train_nos = train_nos[order]
+    relations = relations[order]
+    train_serv_arr = train_serv[order]
+    delays = delays[order]
+
+    # Find consecutive pairs within same train
+    same_train = train_nos[1:] == train_nos[:-1]
+    increases = delays[1:] - delays[:-1]
+    above = increases > threshold
+
+    hits = same_train & above
+    idx = np.where(hits)[0]
+
+    events = []
+    for i in idx:
+        events.append((
+            stations[i],       # from_station
+            stations[i + 1],   # to_station
+            float(increases[i]),
+            train_nos[i + 1],
+            relations[i + 1],
+            datdep_str,
+            train_serv_arr[i + 1],
+        ))
+    return events
+
+
+# Cache key includes all parameters that affect the result
+cache_key = (
+    tuple(all_dates), token, threshold_sec, tuple(hour_range),
+    delay_floor_sec, delay_cap_sec, exclude_outliers,
+)
+
+if st.session_state.get("_prop_agg_key") == cache_key:
+    station_agg = st.session_state["_prop_station_agg"]
+    segment_agg = st.session_state["_prop_segment_agg"]
+    all_operators_found = st.session_state["_prop_operators"]
+else:
+    progress = st.progress(0, text="Loading and processing...")
+    all_events = []
+    operators_seen = set()
+
+    for i, d in enumerate(all_dates):
+        progress.progress(i / n_days,
+                          text=f"Processing {d.strftime('%d %b %Y')} ({i+1}/{n_days})...")
+        ts = noon_timestamp(d.year, d.month, d.day)
+        try:
+            records = fetch_punctuality(ts, token)
+        except Exception:
+            continue
+        if not records:
+            continue
+
+        # Collect operators before processing
+        for r in records[:100]:  # sample first 100 for operators
+            if r.get("train_serv"):
+                operators_seen.add(r["train_serv"])
+
+        events = _process_day(
+            records, str(d), threshold_sec, hour_range[0], hour_range[1],
+            delay_floor_sec, delay_cap_sec, exclude_outliers,
+        )
+        all_events.extend(events)
+        del records  # free memory immediately
+
+    progress.progress(1.0, text="Aggregating...")
+
+    all_operators_found = sorted(operators_seen)
+
+    if not all_events:
+        progress.empty()
+        st.warning("No delay propagation events found.")
+        st.stop()
+
+    # Build aggregations directly from event tuples
+    # Station accumulator
+    sta_total = defaultdict(float)
+    sta_count = defaultdict(int)
+    sta_trains = defaultdict(set)
+    sta_days = defaultdict(set)
+    sta_rels = defaultdict(lambda: defaultdict(int))
+
+    seg_total = defaultdict(float)
+    seg_count = defaultdict(int)
+    seg_trains = defaultdict(set)
+
+    for from_s, to_s, increase, train, rel, datdep, serv in all_events:
+        sta_total[to_s] += increase
+        sta_count[to_s] += 1
+        sta_trains[to_s].add(train)
+        sta_days[to_s].add(datdep)
+        sta_rels[to_s][rel] += 1
+
+        seg_key = (from_s, to_s)
+        seg_total[seg_key] += increase
+        seg_count[seg_key] += 1
+        seg_trains[seg_key].add(train)
+
+    del all_events
+
+    station_rows = []
+    for s in sta_total:
+        top_rel = max(sta_rels[s], key=sta_rels[s].get)
+        station_rows.append({
+            "station": s,
+            "total_delay_min": round(sta_total[s] / 60, 1),
+            "avg_increase_min": round(sta_total[s] / sta_count[s] / 60, 1),
+            "n_incidents": sta_count[s],
+            "n_trains": len(sta_trains[s]),
+            "n_days": len(sta_days[s]),
+            "top_relation": top_rel,
+        })
+    station_agg = pd.DataFrame(station_rows)
+
+    segment_rows = []
+    for (f, t) in seg_total:
+        segment_rows.append({
+            "from_station": f,
+            "to_station": t,
+            "total_delay_min": round(seg_total[(f, t)] / 60, 1),
+            "avg_increase_min": round(seg_total[(f, t)] / seg_count[(f, t)] / 60, 1),
+            "n_incidents": seg_count[(f, t)],
+            "n_trains": len(seg_trains[(f, t)]),
+        })
+    segment_agg = pd.DataFrame(segment_rows) if segment_rows else pd.DataFrame()
+
+    progress.empty()
+
+    st.session_state["_prop_agg_key"] = cache_key
+    st.session_state["_prop_station_agg"] = station_agg
+    st.session_state["_prop_segment_agg"] = segment_agg
+    st.session_state["_prop_operators"] = all_operators_found
+
+# Operator filter (post-hoc on aggregated data — filters by top_relation's operator)
 with operator_placeholder:
     selected_operators = st.multiselect(
-        "Operators", available_operators, default=available_operators,
+        "Operators", all_operators_found, default=all_operators_found,
         key="prop_ops",
     )
-if selected_operators:
-    df = df[df["train_serv"].isin(selected_operators)]
-if df.empty:
-    st.warning("No data after operator filter.")
+
+if station_agg.empty:
+    st.warning("No delay propagation events found with current settings.")
     st.stop()
+
+station_agg = station_agg[station_agg["n_incidents"] >= min_incidents]
+if segment_agg is not None and not segment_agg.empty:
+    segment_agg = segment_agg[segment_agg["n_incidents"] >= min_incidents]
 
 # Station coordinates
 ts_infra = noon_timestamp(start_date.year, start_date.month, start_date.day)
@@ -151,93 +314,6 @@ def _build_station_coords(op_json):
 
 station_coords = _build_station_coords(op_points)
 
-# ── Compute delay propagation ────────────────────────────────────────────────
-
-delay_floor_sec = delay_floor * 60
-delay_cap_sec = delay_cap * 60
-
-
-@st.cache_data(show_spinner="Analysing delay propagation...", ttl=3600)
-def _compute_propagation(df_records, threshold, h_range,
-                         floor_sec, cap_sec, exclude):
-    df = pd.DataFrame(df_records)
-    df["delay_dep_sec"] = pd.to_numeric(df["delay_dep"], errors="coerce")
-    df["station"] = df["ptcar_lg_nm_nl"].str.strip().str.upper()
-
-    # Parse departure time as minutes
-    parts = df["planned_time_dep"].astype(str).str.split(":", expand=True)
-    df["dep_h"] = pd.to_numeric(parts[0], errors="coerce").fillna(-1).astype(int)
-    df["dep_m"] = pd.to_numeric(parts[1], errors="coerce").fillna(0).astype(int)
-    df["dep_total"] = df["dep_h"] * 60 + df["dep_m"]
-
-    # Hour filter
-    df = df[(df["dep_h"] >= h_range[0]) & (df["dep_h"] < h_range[1])]
-    df = df.dropna(subset=["delay_dep_sec"])
-
-    # Delay range filter
-    if exclude:
-        df = df[(df["delay_dep_sec"] >= floor_sec) & (df["delay_dep_sec"] <= cap_sec)]
-    else:
-        df["delay_dep_sec"] = df["delay_dep_sec"].where(
-            df["delay_dep_sec"] >= floor_sec, 0.0)
-        df["delay_dep_sec"] = df["delay_dep_sec"].clip(upper=cap_sec)
-
-    results = []
-    for (train_no, datdep), grp in df.groupby(["train_no", "datdep"]):
-        journey = grp.sort_values("dep_total")
-        delays = journey["delay_dep_sec"].values
-        stations = journey["station"].values
-        relations = journey["relation"].values
-
-        for i in range(1, len(delays)):
-            increase = delays[i] - delays[i - 1]
-            if increase > threshold:
-                results.append({
-                    "from_station": stations[i - 1],
-                    "to_station": stations[i],
-                    "station": stations[i],
-                    "delay_increase_sec": float(increase),
-                    "train_no": train_no,
-                    "relation": relations[i],
-                    "datdep": datdep,
-                })
-
-    if not results:
-        return pd.DataFrame(), pd.DataFrame()
-
-    prop_df = pd.DataFrame(results)
-
-    station_agg = prop_df.groupby("station").agg(
-        total_delay_min=("delay_increase_sec", lambda x: x.sum() / 60),
-        avg_increase_min=("delay_increase_sec", lambda x: x.mean() / 60),
-        n_incidents=("delay_increase_sec", "count"),
-        n_trains=("train_no", "nunique"),
-        n_days=("datdep", "nunique"),
-        top_relation=("relation", lambda x: x.value_counts().index[0]),
-    ).reset_index()
-
-    segment_agg = prop_df.groupby(["from_station", "to_station"]).agg(
-        total_delay_min=("delay_increase_sec", lambda x: x.sum() / 60),
-        avg_increase_min=("delay_increase_sec", lambda x: x.mean() / 60),
-        n_incidents=("delay_increase_sec", "count"),
-        n_trains=("train_no", "nunique"),
-    ).reset_index()
-
-    return station_agg, segment_agg
-
-
-station_agg, segment_agg = _compute_propagation(
-    df.to_dict("records"), threshold_sec, tuple(hour_range),
-    delay_floor_sec, delay_cap_sec, exclude_outliers,
-)
-
-if station_agg.empty:
-    st.warning("No delay propagation events found with current settings.")
-    st.stop()
-
-station_agg = station_agg[station_agg["n_incidents"] >= min_incidents]
-segment_agg = segment_agg[segment_agg["n_incidents"] >= min_incidents]
-
 # ── Header ───────────────────────────────────────────────────────────────────
 
 st.caption(
@@ -252,17 +328,13 @@ with st.expander("How is this computed?"):
 **Goal**: Identify where delays are *introduced* into the network.
 
 **Algorithm**:
-1. For each day in the range, punctuality data is fetched from Infrabel.
-2. Each train journey (grouped by train number + date) is sorted by planned departure.
-3. For each consecutive pair of stops, the **delay increase** is computed:
-   `increase = delay_dep[next_stop] - delay_dep[current_stop]`
-4. If the increase exceeds **{threshold_sec} seconds**, the destination station
-   (or the segment) is flagged as introducing delay.
-5. Results are aggregated across all trains and days.
+1. Each day is fetched and processed individually (no full dataset in memory).
+2. Per train journey: sorted by planned departure, consecutive delay increases computed.
+3. Increases above **{threshold_sec}s** are recorded and aggregated across all days.
 
 **Delay range** ({delay_floor}–{delay_cap} min):
-- *Exclude OFF*: delays below {delay_floor} min clamped to 0, above {delay_cap} min clamped to {delay_cap}.
-- *Exclude ON*: records outside range are dropped.
+- *Exclude OFF*: below-min clamped to 0, above-max clamped to max.
+- *Exclude ON*: records outside range dropped.
 """)
 
 c1, c2, c3, c4 = st.columns(4)
@@ -274,14 +346,30 @@ if not station_agg.empty:
     c3.metric("Worst station", worst["station"])
     c4.metric("Avg increase", f"{station_agg['avg_increase_min'].mean():.1f} min")
 
+
+# ── Color helper ─────────────────────────────────────────────────────────────
+
+def _delay_color(ratio):
+    if ratio < 0.5:
+        r2 = ratio * 2
+        r = int(34 + (255 - 34) * r2)
+        g = int(180 - 40 * r2)
+        b = int(34 - 30 * r2)
+    else:
+        r2 = (ratio - 0.5) * 2
+        r = int(255 - 35 * r2)
+        g = int(140 - 120 * r2)
+        b = int(4 + 30 * r2)
+    return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+
+
 # ── Station view ─────────────────────────────────────────────────────────────
 
 if view_mode == "Stations":
-    station_agg["lat"] = station_agg["station"].map(
-        lambda s: station_coords.get(s, (None, None))[0])
-    station_agg["lon"] = station_agg["station"].map(
-        lambda s: station_coords.get(s, (None, None))[1])
-    geo = station_agg.dropna(subset=["lat", "lon"])
+    lats = station_agg["station"].map(lambda s: station_coords.get(s, (None,))[0])
+    lons = station_agg["station"].map(
+        lambda s: station_coords[s][1] if s in station_coords else None)
+    geo = station_agg.assign(lat=lats, lon=lons).dropna(subset=["lat", "lon"])
 
     if geo.empty:
         st.warning("No stations could be matched to coordinates.")
@@ -295,34 +383,18 @@ if view_mode == "Stations":
     for _, row in geo.iterrows():
         total = row["total_delay_min"]
         avg = row["avg_increase_min"]
-        size_ratio = min(total / max(max_total, 0.1), 1.0)
-        radius = 3 + 14 * size_ratio
-
-        color_ratio = min(avg / max(max_avg, 0.1), 1.0)
-        if color_ratio < 0.5:
-            r2 = color_ratio * 2
-            r = int(34 + (255 - 34) * r2)
-            g = int(180 - 40 * r2)
-            b = int(34 - 30 * r2)
-        else:
-            r2 = (color_ratio - 0.5) * 2
-            r = int(255 - 35 * r2)
-            g = int(140 - 120 * r2)
-            b = int(4 + 30 * r2)
-        color = f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+        radius = 3 + 14 * min(total / max(max_total, 0.1), 1.0)
+        color = _delay_color(min(avg / max(max_avg, 0.1), 1.0))
 
         folium.CircleMarker(
             location=[row["lat"], row["lon"]],
-            radius=radius,
-            color=color, fill=True, fill_color=color,
+            radius=radius, color=color, fill=True, fill_color=color,
             fill_opacity=0.8, weight=1,
             tooltip=(
                 f"<b>{row['station']}</b><br/>"
-                f"Total delay introduced: {total:.0f} min<br/>"
-                f"Avg increase: {avg:.1f} min<br/>"
-                f"Incidents: {int(row['n_incidents'])}<br/>"
-                f"Trains: {int(row['n_trains'])}<br/>"
-                f"Top relation: {row['top_relation']}"
+                f"Total: {total:.0f} min | Avg: {avg:.1f} min<br/>"
+                f"Incidents: {int(row['n_incidents'])} | Trains: {int(row['n_trains'])}<br/>"
+                f"Top: {row['top_relation']}"
             ),
         ).add_to(m)
 
@@ -338,30 +410,28 @@ if view_mode == "Stations":
     top = geo.nlargest(25, "total_delay_min")[
         ["station", "total_delay_min", "avg_increase_min", "n_incidents",
          "n_trains", "n_days", "top_relation"]
-    ].copy()
-    top.columns = ["Station", "Total Delay (min)", "Avg Increase (min)",
+    ]
+    top.columns = ["Station", "Total (min)", "Avg (min)",
                    "Incidents", "Trains", "Days", "Top Relation"]
-    top = top.round(1).reset_index(drop=True)
-    top.index = top.index + 1
-    st.dataframe(top, width="stretch")
+    st.dataframe(top.reset_index(drop=True), width="stretch")
 
 # ── Segment view ─────────────────────────────────────────────────────────────
 
 elif view_mode == "Segments":
-    if segment_agg.empty:
+    if segment_agg is None or segment_agg.empty:
         st.warning("No segments found.")
         st.stop()
 
-    segment_agg["from_lat"] = segment_agg["from_station"].map(
-        lambda s: station_coords.get(s, (None, None))[0])
-    segment_agg["from_lon"] = segment_agg["from_station"].map(
-        lambda s: station_coords.get(s, (None, None))[1])
-    segment_agg["to_lat"] = segment_agg["to_station"].map(
-        lambda s: station_coords.get(s, (None, None))[0])
-    segment_agg["to_lon"] = segment_agg["to_station"].map(
-        lambda s: station_coords.get(s, (None, None))[1])
-
-    geo = segment_agg.dropna(subset=["from_lat", "from_lon", "to_lat", "to_lon"])
+    geo = segment_agg.assign(
+        from_lat=segment_agg["from_station"].map(
+            lambda s: station_coords.get(s, (None,))[0]),
+        from_lon=segment_agg["from_station"].map(
+            lambda s: station_coords[s][1] if s in station_coords else None),
+        to_lat=segment_agg["to_station"].map(
+            lambda s: station_coords.get(s, (None,))[0]),
+        to_lon=segment_agg["to_station"].map(
+            lambda s: station_coords[s][1] if s in station_coords else None),
+    ).dropna(subset=["from_lat", "from_lon", "to_lat", "to_lon"])
 
     if geo.empty:
         st.warning("No segments matched to coordinates.")
@@ -375,33 +445,16 @@ elif view_mode == "Segments":
     for _, row in geo.iterrows():
         total = row["total_delay_min"]
         avg = row["avg_increase_min"]
-        ratio = min(avg / max(max_avg, 0.1), 1.0)
         weight = max(2, min(10, 2 + 8 * min(total / max(max_total, 0.1), 1.0)))
-
-        if ratio < 0.5:
-            r2 = ratio * 2
-            r = int(34 + (255 - 34) * r2)
-            g = int(180 - 40 * r2)
-            b = int(34 - 30 * r2)
-        else:
-            r2 = (ratio - 0.5) * 2
-            r = int(255 - 35 * r2)
-            g = int(140 - 120 * r2)
-            b = int(4 + 30 * r2)
-        color = f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+        color = _delay_color(min(avg / max(max_avg, 0.1), 1.0))
 
         folium.PolyLine(
-            locations=[
-                [row["from_lat"], row["from_lon"]],
-                [row["to_lat"], row["to_lon"]],
-            ],
-            color=color,
-            weight=weight,
-            opacity=0.8,
+            locations=[[row["from_lat"], row["from_lon"]],
+                       [row["to_lat"], row["to_lon"]]],
+            color=color, weight=weight, opacity=0.8,
             tooltip=(
                 f"<b>{row['from_station']} -> {row['to_station']}</b><br/>"
-                f"Total delay: {total:.0f} min<br/>"
-                f"Avg increase: {avg:.1f} min<br/>"
+                f"Total: {total:.0f} min | Avg: {avg:.1f} min<br/>"
                 f"Incidents: {int(row['n_incidents'])}"
             ),
         ).add_to(m)
@@ -418,11 +471,8 @@ elif view_mode == "Segments":
     top = geo.nlargest(25, "total_delay_min")[
         ["from_station", "to_station", "total_delay_min", "avg_increase_min",
          "n_incidents", "n_trains"]
-    ].copy()
-    top.columns = ["From", "To", "Total Delay (min)", "Avg Increase (min)",
-                   "Incidents", "Trains"]
-    top = top.round(1).reset_index(drop=True)
-    top.index = top.index + 1
-    st.dataframe(top, width="stretch")
+    ]
+    top.columns = ["From", "To", "Total (min)", "Avg (min)", "Incidents", "Trains"]
+    st.dataframe(top.reset_index(drop=True), width="stretch")
 
 render_footer()
