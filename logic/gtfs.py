@@ -81,7 +81,7 @@ def _get_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
     return _stop_to_station_cache[key]
 
 
-def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
+def _is_pass_through(st_df: pd.DataFrame) -> bool:
     """Return boolean Series: True where the stop is a pass-through (no boarding/alighting).
 
     GTFS pickup_type=1 means no pickup, drop_off_type=1 means no drop-off.

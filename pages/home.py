@@ -77,6 +77,7 @@ st.markdown("""
     .tag-bfs { background: #e8f5e9; color: #2e7d32; }
     .tag-scatter { background: #fff3e0; color: #e65100; }
     .tag-map { background: #fce4ec; color: #c62828; }
+    .tag-live { background: #f3e5f5; color: #7b1fa2; }
 
     /* Data pipeline */
     .pipeline {
@@ -108,7 +109,7 @@ st.markdown("""
 </style>
 
 <div class="hero">
-    <h1>🚆 SNCB Frequency Explorer</h1>
+    <h1>SNCB Frequency Explorer</h1>
     <p class="subtitle">
         Explore the Belgian rail network through open data.
         Analyse train frequencies, station reachability, connectivity patterns,
@@ -117,6 +118,7 @@ st.markdown("""
     <div class="data-pills">
         <span class="pill">SNCB / NMBS GTFS</span>
         <span class="pill">INFRABEL TRACK GEOMETRY</span>
+        <span class="pill">INFRABEL PUNCTUALITY</span>
         <span class="pill">MOBILITYTWIN API</span>
     </div>
 </div>
@@ -128,13 +130,13 @@ st.markdown("""
     <h4>Data pipeline</h4>
     <div class="pipeline-steps">
         <div class="pipeline-step">GTFS feeds</div>
-        <span class="pipeline-arrow">→</span>
+        <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-step">Filter by date & day</div>
-        <span class="pipeline-arrow">→</span>
+        <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-step">Match to Infrabel tracks</div>
-        <span class="pipeline-arrow">→</span>
+        <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-step">Compute metrics</div>
-        <span class="pipeline-arrow">→</span>
+        <span class="pipeline-arrow">&rarr;</span>
         <div class="pipeline-step">Visualise</div>
     </div>
 </div>
@@ -213,9 +215,81 @@ with col4:
     if st.button("Open Travel Duration", key="nav_dur", width="stretch"):
         st.switch_page("pages/4_Travel_Duration.py")
 
+col5, col6 = st.columns(2)
+
+with col5:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="card-header">
+            <div class="card-icon">⏳</div>
+            <h3>Train Punctuality</h3>
+        </div>
+        <p class="card-desc">How delayed are trains at each station? Animated map showing delay evolution throughout the day, with hourly breakdowns.</p>
+        <div class="card-tags">
+            <span class="tag tag-live">REAL-TIME DATA</span>
+            <span class="tag tag-map">ANIMATED MAP</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Punctuality", key="nav_punct", width="stretch"):
+        st.switch_page("pages/6_Train_Punctuality.py")
+
+with col6:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="card-header">
+            <div class="card-icon">🚏</div>
+            <h3>Stop Accessibility</h3>
+        </div>
+        <p class="card-desc">How far is the nearest transit stop from any point in Belgium? Pick operators, transport mode, and distance thresholds to find transit deserts.</p>
+        <div class="card-tags">
+            <span class="tag tag-gtfs">MULTI-OPERATOR</span>
+            <span class="tag tag-map">GRADIENT HEATMAP</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Accessibility", key="nav_access", width="stretch"):
+        st.switch_page("pages/7_Stop_Accessibility.py")
+
+col7, col8 = st.columns(2)
+
+with col7:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="card-header">
+            <div class="card-icon">🔍</div>
+            <h3>Delay Propagation</h3>
+        </div>
+        <p class="card-desc">Where do delays originate? Analyse multi-day punctuality data to find stations and segments that consistently introduce delays.</p>
+        <div class="card-tags">
+            <span class="tag tag-live">MULTI-DAY</span>
+            <span class="tag tag-map">PROPAGATION MAP</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Delay Propagation", key="nav_prop", width="stretch"):
+        st.switch_page("pages/8_Delay_Propagation.py")
+
+with col8:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="card-header">
+            <div class="card-icon">🚂</div>
+            <h3>Problematic Trains</h3>
+        </div>
+        <p class="card-desc">Which trains are consistently late? Dashboard with repeat offenders, delay profiles by station, and day-to-day reliability metrics.</p>
+        <div class="card-tags">
+            <span class="tag tag-live">MULTI-DAY</span>
+            <span class="tag tag-scatter">DASHBOARD</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Problematic Trains", key="nav_prob", width="stretch"):
+        st.switch_page("pages/9_Problematic_Trains.py")
+
 st.markdown("""
 <div class="footer-home">
     Powered by <strong>MobilityTwin.Brussels</strong> (ULB)<br/>
-    Data: SNCB/NMBS GTFS &middot; Infrabel infrastructure
+    Data: SNCB/NMBS GTFS &middot; Infrabel infrastructure &middot; Infrabel punctuality
 </div>
 """, unsafe_allow_html=True)

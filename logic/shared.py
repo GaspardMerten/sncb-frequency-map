@@ -22,6 +22,16 @@ load_dotenv()
 
 TOKEN = os.getenv("BRUSSELS_MOBILITY_TWIN_KEY", "")
 
+
+def noon_timestamp(year: int, month: int, day: int = 1) -> int:
+    """Return a Unix timestamp for noon (12:00) on the given date.
+
+    Using noon instead of midnight avoids timezone edge cases
+    when the API interprets the timestamp in CET/CEST.
+    """
+    return int(datetime(year, month, day, 12, 0).timestamp())
+
+
 # ── Custom CSS (light blue theme) ────────────────────────────────────────────
 
 CUSTOM_CSS = """
@@ -197,7 +207,7 @@ def render_sidebar_filters():
 
 
 def _month_ranges(start_date: date, end_date: date) -> list[tuple[int, date, date]]:
-    """Return (unix_timestamp_1st, month_start, month_end) for each month in range."""
+    """Return (unix_timestamp_noon, month_start, month_end) for each month in range."""
     months = []
     d = start_date.replace(day=1)
     while d <= end_date:
@@ -206,7 +216,7 @@ def _month_ranges(start_date: date, end_date: date) -> list[tuple[int, date, dat
             month_end = d.replace(day=31)
         else:
             month_end = d.replace(month=d.month + 1, day=1) - timedelta(days=1)
-        ts = int(datetime(d.year, d.month, 1).timestamp())
+        ts = noon_timestamp(d.year, d.month)
         months.append((ts, month_start, month_end))
         if d.month == 12:
             d = d.replace(year=d.year + 1, month=1)
@@ -216,12 +226,7 @@ def _month_ranges(start_date: date, end_date: date) -> list[tuple[int, date, dat
 
 
 def load_all_data(filters: dict):
-    """Fetch and process all shared data with progress indication.
-
-    Uses session_state to cache results per unique filter combination,
-    avoiding redundant recomputation on page reruns.
-    """
-    # Build a hashable cache key from the filters that affect data
+    """Fetch and process all shared data with progress indication."""
     cache_key = (
         filters["token"],
         tuple(filters["all_dates"]),
@@ -249,22 +254,19 @@ def _load_all_data_inner(filters: dict):
         if any(ms <= d <= me for d in all_dates)
     ]
 
-    # ── Accumulate GTFS data across months ───────────────────────────────
     gtfs = _accumulate_gtfs(active_months, all_dates, filters, token)
     if not gtfs["service_ids"]:
         st.error("No active services found across any month.")
         st.stop()
 
-    # Sort departures and build reverse graph
     for sid in gtfs["departures"]:
         gtfs["departures"][sid].sort(key=lambda x: x[0])
     station_departures = dict(gtfs["departures"])
     reverse_departures = build_reverse_timetable_graph(station_departures)
     segment_freqs = {k: v / max(day_count, 1) for k, v in gtfs["seg_freqs"].items()}
 
-    # ── Fetch Infrabel infrastructure ────────────────────────────────────
-    first_ts = months[0][0] if months else int(
-        datetime(filters["start_date"].year, filters["start_date"].month, 1).timestamp()
+    first_ts = months[0][0] if months else noon_timestamp(
+        filters["start_date"].year, filters["start_date"].month,
     )
     infrabel_segs = _safe_fetch(fetch_infrabel_segments, first_ts, token)
     op_points = _safe_fetch(fetch_operational_points, first_ts, token)

@@ -67,6 +67,24 @@ def fetch_operational_points(timestamp: int, token: str) -> dict:
     return r.json()
 
 
+@st.cache_data(ttl=3600, show_spinner="Fetching punctuality data...")
+def fetch_punctuality(timestamp: int, token: str) -> list[dict]:
+    """Fetch Infrabel train punctuality data for a given date.
+
+    The *timestamp* should be a Unix epoch pointing to the desired day.
+    Returns a list of dicts with keys like delay_arr, delay_dep,
+    planned_time_arr, ptcar_lg_nm_nl, etc.
+    """
+    r = requests.get(
+        f"{API_BASE}/infrabel/punctuality",
+        params={"timestamp": timestamp},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 # ---------------------------------------------------------------------------
 # Multi-operator GTFS (De Lijn, STIB/MIVB, TEC)
 # ---------------------------------------------------------------------------
@@ -110,3 +128,29 @@ def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
     finally:
         os.unlink(tmp.name)
     return feed
+
+# ---------------------------------------------------------------------------
+# Multi-day punctuality helper
+# ---------------------------------------------------------------------------
+
+def fetch_punctuality_range(dates, token: str, progress_cb=None) -> list[dict]:
+    """Fetch punctuality data for multiple days.
+
+    Each individual day call uses the cached ``fetch_punctuality``.
+    *progress_cb(i, total, date_obj)* is called before each fetch.
+    Returns a flat list of all records across all days.
+    """
+    from datetime import datetime as _dt
+
+    all_records: list[dict] = []
+    for i, d in enumerate(dates):
+        if progress_cb:
+            progress_cb(i, len(dates), d)
+        ts = int(_dt(d.year, d.month, d.day, 12, 0).timestamp())
+        try:
+            records = fetch_punctuality(ts, token)
+            if records:
+                all_records.extend(records)
+        except Exception:
+            pass  # skip failed days
+    return all_records

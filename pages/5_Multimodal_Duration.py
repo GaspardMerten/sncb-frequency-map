@@ -11,7 +11,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 from datetime import date, datetime
 
-from logic.shared import CUSTOM_CSS, render_footer, load_provinces_geojson, TOKEN
+from logic.shared import CUSTOM_CSS, render_footer, load_provinces_geojson, TOKEN, noon_timestamp
 from logic.geocoding import geocode_address, geocode_suggestions
 from logic.api import fetch_gtfs_operator, OPERATORS
 from logic.multimodal import (
@@ -132,7 +132,7 @@ st.success(f"📍 **{location['display_name']}** — ({origin_lat:.5f}, {origin_
 
 # ── Load GTFS data ───────────────────────────────────────────────────────────
 
-ts = int(datetime(target_date.year, target_date.month, 1).timestamp())
+ts = noon_timestamp(target_date.year, target_date.month)
 target_dates = [target_date]
 
 

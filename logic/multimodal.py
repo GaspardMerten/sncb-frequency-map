@@ -563,3 +563,120 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                     ))
 
     return best_results
+
+
+# ---------------------------------------------------------------------------
+# Multi-source BFS: from a set of source stops outward
+# ---------------------------------------------------------------------------
+
+def bfs_from_stops(source_stop_ids: set[str],
+                   stop_lookup: dict,
+                   station_departures: dict,
+                   transfer_edges: dict,
+                   max_minutes: float,
+                   departure_window: tuple[int, int] = (7, 9),
+                   max_transfers: int = 3,
+                   transfer_penalty_min: int = 3,
+                   ) -> dict[str, dict]:
+    """Multi-source Dijkstra: all *source_stop_ids* start at time 0.
+
+    Propagates outward through the timetable graph to find the minimum
+    travel time from any source to every reachable stop.  This is
+    equivalent to running ``bfs_from_point`` from every source
+    simultaneously, but executes in a single pass.
+
+    Returns: stop_id -> {travel_time, transfers}
+    """
+    # Precompute departure time lists for bisect
+    dep_times = {sid: [d[0] for d in deps]
+                 for sid, deps in station_departures.items()}
+
+    best_results: dict[str, dict] = {}
+
+    start_min = departure_window[0] * 60
+    end_min = departure_window[1] * 60
+
+    for base_time in range(start_min, end_min, 5):
+        deadline = base_time + max_minutes
+
+        best_arrival: dict[str, float] = {}
+        queue: list = []
+
+        # Seed: all source stops at base_time (0 travel time)
+        for sid in source_stop_ids:
+            if sid not in stop_lookup:
+                continue
+            best_arrival[sid] = base_time
+            heapq.heappush(queue, (base_time, sid, 0, None))
+
+        while queue:
+            current_time, current_stop, n_transfers, current_trip = \
+                heapq.heappop(queue)
+
+            if current_time > best_arrival.get(current_stop, float("inf")):
+                continue
+            if current_time > deadline:
+                continue
+            if max_transfers is not None and n_transfers > max_transfers:
+                continue
+
+            total_travel = current_time - base_time
+            if current_stop not in best_results or \
+               total_travel < best_results[current_stop]["travel_time"]:
+                best_results[current_stop] = {
+                    "travel_time": total_travel,
+                    "transfers": n_transfers,
+                }
+
+            # Explore transit departures
+            departures = station_departures.get(current_stop, [])
+            dtimes = dep_times.get(current_stop, [])
+            lo = bisect.bisect_left(dtimes, current_time)
+
+            seen_next = set()
+            for idx in range(lo, len(departures)):
+                dep_min, next_stop, arr_min, trip_id = departures[idx]
+
+                if dep_min > deadline:
+                    break
+                if arr_min > deadline:
+                    continue
+
+                is_same_trip = current_trip is not None and trip_id == current_trip
+
+                if is_same_trip:
+                    new_transfers = n_transfers
+                else:
+                    is_initial = current_trip is None
+                    if not is_initial:
+                        if dep_min < current_time + transfer_penalty_min:
+                            continue
+                        new_transfers = n_transfers + 1
+                        if max_transfers is not None and \
+                           new_transfers > max_transfers:
+                            continue
+                    else:
+                        new_transfers = n_transfers
+
+                    if next_stop in seen_next:
+                        continue
+                    seen_next.add(next_stop)
+
+                if arr_min < best_arrival.get(next_stop, float("inf")):
+                    best_arrival[next_stop] = arr_min
+                    heapq.heappush(queue, (
+                        arr_min, next_stop, new_transfers, trip_id,
+                    ))
+
+            # Explore walking transfers
+            for other_stop, walk_min in transfer_edges.get(current_stop, []):
+                arr_walk = current_time + walk_min
+                if arr_walk > deadline:
+                    continue
+                if arr_walk < best_arrival.get(other_stop, float("inf")):
+                    best_arrival[other_stop] = arr_walk
+                    heapq.heappush(queue, (
+                        arr_walk, other_stop, n_transfers, None,
+                    ))
+
+    return best_results
