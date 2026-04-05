@@ -2,11 +2,7 @@
 
 Identifies stations where train delays cause passengers to miss planned
 connections. Merges Infrabel punctuality data with GTFS station coordinates.
-SNCB only.
-
-A missed connection: Train A arrives at station S with delay, and connecting
-Train B departs from S before Train A actually arrives — but after it was
-scheduled to arrive (i.e. the connection was viable on paper).
+SNCB only. Processes each day incrementally with numpy-vectorized matching.
 """
 
 import os
@@ -76,118 +72,127 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ── Incremental data loading + processing ────────────────────────────────────
+# ── Vectorized day processing ────────────────────────────────────────────────
 
 all_dates = [start_date + timedelta(days=i) for i in range(n_days)]
 min_transfer_sec = min_transfer * 60
 max_transfer_sec = max_transfer * 60
 
 
-def _parse_time_sec(time_str):
-    """Parse HH:MM:SS to seconds since midnight."""
-    if not time_str or not isinstance(time_str, str):
-        return -1
-    parts = time_str.split(":")
-    if len(parts) < 2:
-        return -1
-    try:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + (int(parts[2]) if len(parts) > 2 else 0)
-    except (ValueError, TypeError):
-        return -1
+def _parse_time_sec_vec(series):
+    """Vectorized parse of HH:MM:SS strings to seconds."""
+    parts = series.astype(str).str.split(":", expand=True)
+    h = pd.to_numeric(parts[0], errors="coerce").fillna(-1)
+    m = pd.to_numeric(parts[1], errors="coerce").fillna(0)
+    s = pd.to_numeric(parts.get(2, 0), errors="coerce").fillna(0) if 2 in parts.columns else 0
+    result = (h * 3600 + m * 60 + s).values.astype(np.int64)
+    result[h.values < 0] = -1
+    return result
 
 
 def _process_day_connections(records, h_start, h_end,
-                             min_xfer_sec, max_xfer_sec):
-    """Process one day: find planned connections and check if missed.
+                             min_xfer, max_xfer):
+    """Process one day with numpy vectorization.
 
-    Returns dict: station -> {planned: int, missed: int, missed_trains: list}
+    Returns dict: station -> (planned_count, missed_count)
     """
     if not records:
         return {}
 
-    # Filter to SNCB only
-    sncb = [r for r in records if r.get("train_serv") == "SNCB/NMBS"]
-    if not sncb:
+    df = pd.DataFrame(records)
+
+    # SNCB only
+    df = df[df["train_serv"] == "SNCB/NMBS"]
+    if df.empty:
         return {}
 
-    # Group by station
-    by_station = defaultdict(list)
-    for r in sncb:
-        station = (r.get("ptcar_lg_nm_nl") or "").strip().upper()
-        if not station:
-            continue
+    # Parse times vectorized
+    arr_sec = _parse_time_sec_vec(df["planned_time_arr"])
+    dep_sec = _parse_time_sec_vec(df["planned_time_dep"])
+    delay_arr = pd.to_numeric(df["delay_arr"], errors="coerce").fillna(0).values.astype(np.int64)
+    delay_dep = pd.to_numeric(df["delay_dep"], errors="coerce").fillna(0).values.astype(np.int64)
+    stations = df["ptcar_lg_nm_nl"].str.strip().str.upper().values
+    trains = df["train_no"].values
 
-        arr_time = _parse_time_sec(r.get("planned_time_arr"))
-        dep_time = _parse_time_sec(r.get("planned_time_dep"))
-        delay_arr = r.get("delay_arr")
-        delay_dep = r.get("delay_dep")
+    # Hour filter
+    arr_h = arr_sec // 3600
+    dep_h = dep_sec // 3600
+    in_range = ((arr_h >= h_start) & (arr_h < h_end)) | ((dep_h >= h_start) & (dep_h < h_end))
+    valid = in_range & ((arr_sec >= 0) | (dep_sec >= 0))
 
-        if arr_time < 0 and dep_time < 0:
-            continue
+    arr_sec = arr_sec[valid]
+    dep_sec = dep_sec[valid]
+    delay_arr = delay_arr[valid]
+    delay_dep = delay_dep[valid]
+    stations = stations[valid]
+    trains = trains[valid]
 
-        arr_h = arr_time // 3600 if arr_time >= 0 else -1
-        dep_h = dep_time // 3600 if dep_time >= 0 else -1
+    if len(stations) == 0:
+        return {}
 
-        # At least one time must be in hour range
-        if not ((h_start <= arr_h < h_end) or (h_start <= dep_h < h_end)):
-            continue
+    # Group by station using numpy — sort by station then process runs
+    order = np.argsort(stations, kind="stable")
+    stations_s = stations[order]
+    arr_s = arr_sec[order]
+    dep_s = dep_sec[order]
+    da_s = delay_arr[order]
+    dd_s = delay_dep[order]
+    tr_s = trains[order]
 
-        by_station[station].append({
-            "train": r.get("train_no", "?"),
-            "relation": r.get("relation", "?"),
-            "arr_sec": arr_time,
-            "dep_sec": dep_time,
-            "delay_arr": int(delay_arr) if delay_arr is not None else 0,
-            "delay_dep": int(delay_dep) if delay_dep is not None else 0,
-        })
+    # Find station boundaries
+    breaks = np.where(stations_s[1:] != stations_s[:-1])[0] + 1
+    starts = np.concatenate([[0], breaks])
+    ends = np.concatenate([breaks, [len(stations_s)]])
 
-    # For each station, find connections and check if missed
     result = {}
-    for station, stops in by_station.items():
-        # Separate arrivals and departures
-        arrivals = [(s["train"], s["arr_sec"], s["delay_arr"], s["relation"])
-                    for s in stops if s["arr_sec"] >= 0]
-        departures = [(s["train"], s["dep_sec"], s["delay_dep"], s["relation"])
-                      for s in stops if s["dep_sec"] >= 0]
+    for si in range(len(starts)):
+        s, e = starts[si], ends[si]
+        station_name = stations_s[s]
 
-        if not arrivals or not departures:
+        # Arrivals: valid arr_sec
+        arr_mask = arr_s[s:e] >= 0
+        arr_planned = arr_s[s:e][arr_mask]
+        arr_actual = arr_planned + da_s[s:e][arr_mask]
+        arr_trains = tr_s[s:e][arr_mask]
+
+        # Departures: valid dep_sec
+        dep_mask = dep_s[s:e] >= 0
+        dep_planned = dep_s[s:e][dep_mask]
+        dep_actual = dep_planned + dd_s[s:e][dep_mask]
+        dep_trains = tr_s[s:e][dep_mask]
+
+        n_arr = len(arr_planned)
+        n_dep = len(dep_planned)
+        if n_arr == 0 or n_dep == 0:
             continue
 
-        # Sort by planned time
-        arrivals.sort(key=lambda x: x[1])
-        departures.sort(key=lambda x: x[1])
+        # Vectorized connection detection using broadcasting
+        # gap[i,j] = dep_planned[j] - arr_planned[i]
+        gap = dep_planned[None, :] - arr_planned[:, None]  # (n_arr, n_dep)
 
-        planned = 0
-        missed = 0
+        # Valid connections: gap in [min_xfer, max_xfer] and different train
+        diff_train = arr_trains[:, None] != dep_trains[None, :]  # (n_arr, n_dep)
+        valid_conn = diff_train & (gap >= min_xfer) & (gap <= max_xfer)
 
-        for arr_train, arr_planned, arr_delay, arr_rel in arrivals:
-            actual_arr = arr_planned + arr_delay
+        planned_count = int(valid_conn.sum())
+        if planned_count == 0:
+            continue
 
-            for dep_train, dep_planned, dep_delay, dep_rel in departures:
-                # Skip same train
-                if dep_train == arr_train:
-                    continue
+        # Missed: actual_arr > actual_dep where connection was valid
+        actual_arr_2d = arr_actual[:, None]  # (n_arr, 1)
+        actual_dep_2d = dep_actual[None, :]  # (1, n_dep)
+        missed_mask = valid_conn & (actual_arr_2d > actual_dep_2d)
+        missed_count = int(missed_mask.sum())
 
-                # Check if this is a valid planned connection
-                gap = dep_planned - arr_planned
-                if gap < min_xfer_sec:
-                    continue
-                if gap > max_xfer_sec:
-                    break  # sorted, no more valid connections
+        result[station_name] = (planned_count, missed_count)
 
-                # This is a planned connection
-                planned += 1
-
-                # Check if missed: actual arrival > actual departure
-                actual_dep = dep_planned + dep_delay
-                if actual_arr > actual_dep:
-                    missed += 1
-
-        if planned > 0:
-            result[station] = {"planned": planned, "missed": missed}
+        # Free the 2D arrays
+        del gap, diff_train, valid_conn, missed_mask
 
     return result
 
+
+# ── Incremental processing across days ───────────────────────────────────────
 
 cache_key = (
     tuple(all_dates), token, min_transfer_sec, max_transfer_sec, tuple(hour_range),
@@ -198,7 +203,6 @@ if st.session_state.get("_mc_agg_key") == cache_key:
 else:
     progress = st.progress(0, text="Loading and processing...")
 
-    # Accumulate across days
     acc_planned = defaultdict(int)
     acc_missed = defaultdict(int)
     acc_days = defaultdict(int)
@@ -220,9 +224,9 @@ else:
         )
         del records
 
-        for station, counts in day_result.items():
-            acc_planned[station] += counts["planned"]
-            acc_missed[station] += counts["missed"]
+        for station, (p, m) in day_result.items():
+            acc_planned[station] += p
+            acc_missed[station] += m
             acc_days[station] += 1
 
     progress.progress(1.0, text="Done!")
@@ -293,18 +297,12 @@ with st.expander("How is this computed?"):
 
 **Algorithm**:
 1. For each day, Infrabel punctuality data is fetched (SNCB trains only).
-2. At each station, all arrivals and departures are collected.
-3. A **planned connection** is a pair (Train A arriving, Train B departing)
-   where the planned gap is between **{min_transfer}** and **{max_transfer}** minutes
-   and they are different trains.
-4. A connection is **missed** if Train A's actual arrival time
-   (planned + delay) is later than Train B's actual departure time
-   (planned + delay).
-5. Results are aggregated across all days.
-
-**Interpretation**: Stations with high miss rates are bottlenecks where
-tight connections are frequently broken by delays — potential candidates
-for schedule padding or infrastructure improvements.
+2. At each station, arrivals and departures are matched using **numpy broadcasting**
+   — no Python nested loop. The gap matrix `dep_planned - arr_planned` is computed
+   in one operation for all pairs simultaneously.
+3. A **planned connection**: different trains, planned gap in [{min_transfer}, {max_transfer}] min.
+4. **Missed** if `actual_arrival > actual_departure`.
+5. Aggregated across all days.
 """)
 
 # Metrics
@@ -354,7 +352,6 @@ def _miss_color(rate, max_r):
 for _, row in geo.iterrows():
     missed = row["missed_connections"]
     rate = row["miss_rate"]
-    # Size by total missed connections, color by miss rate
     size_ratio = min(missed / max(max_missed, 1), 1.0)
     radius = 3 + 14 * size_ratio
     color = _miss_color(rate, max_rate)
@@ -366,11 +363,10 @@ for _, row in geo.iterrows():
         fill_opacity=0.8, weight=1,
         tooltip=(
             f"<b>{row['station']}</b><br/>"
-            f"Planned connections: {int(row['planned_connections']):,}<br/>"
+            f"Planned: {int(row['planned_connections']):,}<br/>"
             f"Missed: {int(row['missed_connections']):,}<br/>"
             f"Miss rate: {rate:.1f}%<br/>"
-            f"Avg missed/day: {row['avg_missed_per_day']:.1f}<br/>"
-            f"Days: {int(row['n_days'])}"
+            f"Avg missed/day: {row['avg_missed_per_day']:.1f}"
         ),
     ).add_to(m)
 
@@ -400,9 +396,8 @@ import plotly.express as px
 fig = px.histogram(
     geo, x="miss_rate", nbins=30,
     labels={"miss_rate": "Miss Rate (%)"},
-    title="Distribution of miss rates across stations",
 )
-fig.update_layout(height=300, margin=dict(t=40, b=30))
+fig.update_layout(height=300, margin=dict(t=10, b=30))
 st.plotly_chart(fig, use_container_width=True)
 
 render_footer()
