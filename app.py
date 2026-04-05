@@ -19,7 +19,8 @@ punctuality = st.Page("pages/6_Train_Punctuality.py", title="Train Punctuality",
 accessibility = st.Page("pages/7_Stop_Accessibility.py", title="Stop Accessibility", icon="🚏")
 propagation = st.Page("pages/8_Delay_Propagation.py", title="Delay Propagation", icon="🔍")
 problematic = st.Page("pages/9_Problematic_Trains.py", title="Problematic Trains", icon="🚂")
+missed = st.Page("pages/10_Missed_Connections.py", title="Missed Connections", icon="🔗")
 
 pg = st.navigation([home, segments, reach, connectivity, duration, multimodal,
-                     punctuality, accessibility, propagation, problematic])
+                     punctuality, accessibility, propagation, problematic, missed])
 pg.run()

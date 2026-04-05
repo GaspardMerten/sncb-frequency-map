@@ -287,6 +287,25 @@ with col8:
     if st.button("Open Problematic Trains", key="nav_prob", width="stretch"):
         st.switch_page("pages/9_Problematic_Trains.py")
 
+col9, _ = st.columns(2)
+
+with col9:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="card-header">
+            <div class="card-icon">🔗</div>
+            <h3>Missed Connections</h3>
+        </div>
+        <p class="card-desc">Where do delays break planned connections? Identifies stations where arriving passengers miss their connecting train due to delays.</p>
+        <div class="card-tags">
+            <span class="tag tag-live">SNCB ONLY</span>
+            <span class="tag tag-map">CONNECTION MAP</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Missed Connections", key="nav_mc", width="stretch"):
+        st.switch_page("pages/10_Missed_Connections.py")
+
 st.markdown("""
 <div class="footer-home">
     Powered by <strong>MobilityTwin.Brussels</strong> (ULB)<br/>
