@@ -17,7 +17,7 @@ from folium.plugins import TimestampedGeoJson
 from dotenv import load_dotenv
 
 from logic.shared import CUSTOM_CSS, render_footer, load_provinces_geojson, noon_timestamp
-from logic.api import fetch_punctuality, fetch_operational_points
+from logic.api import fetch_punctuality, fetch_operational_points, punctuality_ts
 
 load_dotenv()
 
@@ -90,7 +90,8 @@ with st.sidebar:
 
 # ── Load data ────────────────────────────────────────────────────────────────
 
-ts = noon_timestamp(selected_date.year, selected_date.month, selected_date.day)
+ts_infra = noon_timestamp(selected_date.year, selected_date.month, selected_date.day)
+ts_punct = punctuality_ts(selected_date)
 
 
 @st.cache_data(show_spinner="Building station coordinates...", ttl=3600)
@@ -109,10 +110,10 @@ def _build_station_coords(op_points_json):
     return coords
 
 
-op_points = fetch_operational_points(ts, token)
+op_points = fetch_operational_points(ts_infra, token)
 station_coords = _build_station_coords(op_points)
 
-raw = fetch_punctuality(ts, token)
+raw = fetch_punctuality(ts_punct, token)
 if not raw:
     st.warning("No punctuality data returned for this date.")
     st.stop()

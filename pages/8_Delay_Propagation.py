@@ -18,7 +18,7 @@ import branca.colormap as cm
 from dotenv import load_dotenv
 
 from logic.shared import CUSTOM_CSS, render_footer, noon_timestamp
-from logic.api import fetch_punctuality, fetch_operational_points
+from logic.api import fetch_punctuality, fetch_operational_points, punctuality_ts
 
 load_dotenv()
 
@@ -189,7 +189,7 @@ else:
     for i, d in enumerate(all_dates):
         progress.progress(i / n_days,
                           text=f"Processing {d.strftime('%d %b %Y')} ({i+1}/{n_days})...")
-        ts = noon_timestamp(d.year, d.month, d.day)
+        ts = punctuality_ts(d)
         try:
             records = fetch_punctuality(ts, token)
         except Exception:

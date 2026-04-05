@@ -3,12 +3,28 @@
 import dataclasses
 import os
 import tempfile
+from datetime import datetime, timedelta
+
 import requests
 import streamlit as st
 from types import SimpleNamespace
 from gtfs_parquet import read_parquet
 
 API_BASE = "https://api.mobilitytwin.brussels"
+
+# The punctuality endpoint returns data for 2 days before the requested
+# timestamp.  To get data for date D, request timestamp for D+2 at noon.
+_PUNCTUALITY_OFFSET_DAYS = 2
+
+
+def punctuality_ts(d) -> int:
+    """Return the API timestamp needed to fetch punctuality for date *d*.
+
+    The Infrabel punctuality endpoint returns data for the day that is
+    2 days before the timestamp, so we add 2 days and use noon.
+    """
+    target = d + timedelta(days=_PUNCTUALITY_OFFSET_DAYS)
+    return int(datetime(target.year, target.month, target.day, 12, 0).timestamp())
 
 
 def _to_pandas_feed(pq_feed):
@@ -69,11 +85,10 @@ def fetch_operational_points(timestamp: int, token: str) -> dict:
 
 @st.cache_data(ttl=3600, show_spinner="Fetching punctuality data...")
 def fetch_punctuality(timestamp: int, token: str) -> list[dict]:
-    """Fetch Infrabel train punctuality data for a given date.
+    """Fetch Infrabel train punctuality data.
 
-    The *timestamp* should be a Unix epoch pointing to the desired day.
-    Returns a list of dicts with keys like delay_arr, delay_dep,
-    planned_time_arr, ptcar_lg_nm_nl, etc.
+    The *timestamp* is passed directly to the API.  Use ``punctuality_ts(d)``
+    to compute the correct timestamp for a given date (applies the +2 day offset).
     """
     r = requests.get(
         f"{API_BASE}/infrabel/punctuality",
@@ -89,7 +104,6 @@ def fetch_punctuality(timestamp: int, token: str) -> list[dict]:
 # Multi-operator GTFS (De Lijn, STIB/MIVB, TEC)
 # ---------------------------------------------------------------------------
 
-# Operator slug used in the MobilityTwin API
 OPERATORS = {
     "SNCB":    "sncb",
     "De Lijn": "de-lijn",
@@ -100,12 +114,7 @@ OPERATORS = {
 
 def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
                         progress_cb=None):
-    """Download and parse a GTFS parquet for any supported operator.
-
-    *progress_cb*: optional ``(downloaded_bytes, total_bytes) -> None``
-    callback invoked during the download so the caller can update a
-    progress bar.  When *None* the file is streamed silently.
-    """
+    """Download and parse a GTFS parquet for any supported operator."""
     r = requests.get(
         f"{API_BASE}/{operator_slug}/gtfs-parquet",
         params={"timestamp": timestamp},
@@ -118,7 +127,7 @@ def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     try:
         downloaded = 0
-        for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB
+        for chunk in r.iter_content(chunk_size=1 << 20):
             tmp.write(chunk)
             downloaded += len(chunk)
             if progress_cb and total:
@@ -128,29 +137,3 @@ def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
     finally:
         os.unlink(tmp.name)
     return feed
-
-# ---------------------------------------------------------------------------
-# Multi-day punctuality helper
-# ---------------------------------------------------------------------------
-
-def fetch_punctuality_range(dates, token: str, progress_cb=None) -> list[dict]:
-    """Fetch punctuality data for multiple days.
-
-    Each individual day call uses the cached ``fetch_punctuality``.
-    *progress_cb(i, total, date_obj)* is called before each fetch.
-    Returns a flat list of all records across all days.
-    """
-    from datetime import datetime as _dt
-
-    all_records: list[dict] = []
-    for i, d in enumerate(dates):
-        if progress_cb:
-            progress_cb(i, len(dates), d)
-        ts = int(_dt(d.year, d.month, d.day, 12, 0).timestamp())
-        try:
-            records = fetch_punctuality(ts, token)
-            if records:
-                all_records.extend(records)
-        except Exception:
-            pass  # skip failed days
-    return all_records
