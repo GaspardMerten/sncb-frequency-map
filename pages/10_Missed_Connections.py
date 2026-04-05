@@ -111,8 +111,8 @@ def _process_day_connections(records, h_start, h_end,
     dep_sec = _parse_time_sec_vec(df["planned_time_dep"])
     delay_arr = pd.to_numeric(df["delay_arr"], errors="coerce").fillna(0).values.astype(np.int64)
     delay_dep = pd.to_numeric(df["delay_dep"], errors="coerce").fillna(0).values.astype(np.int64)
-    stations = df["ptcar_lg_nm_nl"].str.strip().str.upper().values
-    trains = df["train_no"].values
+    stations = np.asarray(df["ptcar_lg_nm_nl"].str.strip().str.upper().values, dtype=object)
+    trains = np.asarray(df["train_no"].values, dtype=object)
 
     # Hour filter
     arr_h = arr_sec // 3600
