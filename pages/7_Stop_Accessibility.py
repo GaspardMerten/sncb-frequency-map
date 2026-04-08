@@ -136,12 +136,9 @@ all_operators = list(set(dest_operators + feeder_operators))
 ts = noon_timestamp(target_date.year, target_date.month)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner="Loading stop data...", ttl=3600)
 def _load_stop_arrays(operators, ts, token, target_date_):
     """Load GTFS feeds and extract active stop locations as numpy arrays."""
-    progress = st.progress(0, text="Loading stop data...")
-    n_ops = len(operators)
-
     all_lats = []
     all_lons = []
     all_names = []
@@ -149,12 +146,10 @@ def _load_stop_arrays(operators, ts, token, target_date_):
 
     for i, op_name in enumerate(operators):
         slug = OPERATORS[op_name]
-        progress.progress(i / n_ops, text=f"Downloading {op_name}...")
 
         try:
             feed = fetch_gtfs_operator(slug, ts, token)
-        except Exception as e:
-            st.warning(f"Could not load {op_name}: {e}")
+        except Exception:
             continue
 
         if feed.stops is None:
@@ -200,9 +195,6 @@ def _load_stop_arrays(operators, ts, token, target_date_):
             all_lons.append(lon)
             all_names.append(names[j])
             all_ops.append(op_name)
-
-    progress.progress(1.0, text="Done!")
-    progress.empty()
 
     if not all_lats:
         return None
@@ -294,12 +286,13 @@ prov_geo = load_provinces_geojson()
 
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def _cached_belgium_mask(res, _prov_geo_id):
+def _cached_belgium_mask(res):
     """Build and cache boolean mask of grid cells inside Belgium."""
     lat_lin = np.linspace(BE_LAT_MIN, BE_LAT_MAX, res)
     lon_lin = np.linspace(BE_LON_MIN, BE_LON_MAX, res)
 
-    belgium = _get_belgium_border(prov_geo)
+    geo = load_provinces_geojson()
+    belgium = _get_belgium_border(geo)
     belgium_prep = shp_prepared.prep(belgium)
     mask = np.zeros((res, res), dtype=bool)
 
@@ -322,7 +315,7 @@ def _cached_belgium_mask(res, _prov_geo_id):
 
 @st.cache_data(show_spinner="Computing accessibility grid...", ttl=3600)
 def _compute_grid_kdtree(stop_lats, stop_lons, stop_times, speed_kmh,
-                         max_time, max_dist_km, res, _prov_geo_id):
+                         max_time, max_dist_km, res):
     """Compute travel time grid using cKDTree for nearest-stop lookup.
 
     Uses scaled coordinates so Euclidean distance approximates Manhattan/great-circle.
@@ -352,7 +345,7 @@ def _compute_grid_kdtree(stop_lats, stop_lons, stop_times, speed_kmh,
     grid_time = (s_times[indices] + dists_km / speed_kmh * 60.0).reshape(res, res)
 
     # Apply Belgium mask
-    mask = _cached_belgium_mask(res, id(prov_geo))
+    mask = _cached_belgium_mask(res)
     grid_time[~mask] = np.nan
     grid_time[grid_time > max_time] = np.nan
     if max_dist_km < 999:
@@ -364,23 +357,18 @@ def _compute_grid_kdtree(stop_lats, stop_lons, stop_times, speed_kmh,
 
 # ── Feeder mode: multi-source BFS + grid ─────────────────────────────────────
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner="Building feeder transit graph...", ttl=3600)
 def _build_feeder_graph(dest_ops, feeder_ops, ts, token, target_date_,
                         dep_window, transfer_dist_km):
     combined_ops = list(set(list(dest_ops) + list(feeder_ops)))
     feeds = {}
     sids_per_op = {}
 
-    progress = st.progress(0, text="Building feeder transit graph...")
-    n_ops = len(combined_ops)
-
     for i, op_name in enumerate(combined_ops):
         slug = OPERATORS[op_name]
-        progress.progress(i / n_ops, text=f"Loading {op_name}...")
         try:
             feed = fetch_gtfs_operator(slug, ts, token)
-        except Exception as e:
-            st.warning(f"Could not load {op_name}: {e}")
+        except Exception:
             continue
         if feed.stop_times is None or feed.trips is None:
             continue
@@ -391,21 +379,14 @@ def _build_feeder_graph(dest_ops, feeder_ops, ts, token, target_date_,
         sids_per_op[op_name] = sids
 
     if not feeds:
-        progress.empty()
         return None
 
-    progress.progress(0.6, text="Building stop lookup...")
     stop_lookup = build_multimodal_stop_lookup(feeds)
-    progress.progress(0.7, text="Building timetable graph...")
     graph = build_multimodal_graph(feeds, sids_per_op, dep_window)
-    progress.progress(0.8, text="Building transfer edges...")
     transfers = build_transfer_edges(stop_lookup, max_walk_km=transfer_dist_km)
 
     dest_stop_ids = {sid for sid, info in stop_lookup.items()
                      if info["operator"] in dest_ops}
-
-    progress.progress(1.0, text="Done!")
-    progress.empty()
 
     return {
         "stop_lookup": stop_lookup,
@@ -463,7 +444,7 @@ if use_feeder and feeder_operators:
 
     grid_time = _compute_grid_kdtree(
         bfs_lats, bfs_lons, bfs_times,
-        speed, max_time_min, 999.0, resolution, id(prov_geo),
+        speed, max_time_min, 999.0, resolution,
     )
 else:
     d_lats = stop_data["lats"][dest_mask]
@@ -471,7 +452,7 @@ else:
     grid_time = _compute_grid_kdtree(
         d_lats.tolist(), d_lons.tolist(),
         [0.0] * int(dest_mask.sum()),
-        speed, max_time_min, max_distance_km, resolution, id(prov_geo),
+        speed, max_time_min, max_distance_km, resolution,
     )
 
 # ── Gradient view (single-pass RGBA) ─────────────────────────────────────────
