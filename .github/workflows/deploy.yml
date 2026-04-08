@@ -12,6 +12,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     permissions:
       contents: read
@@ -32,12 +33,13 @@ jobs:
           region: ${{ env.REGION }}
           project_id: ${{ env.PROJECT_ID }}
           flags: |
-            --memory=2Gi
-            --cpu=1
+            --memory=4Gi
+            --cpu=4
             --min-instances=0
             --max-instances=3
-            --concurrency=1
-            --timeout=300
+            --concurrency=80
+            --session-affinity
+            --timeout=900
             --port=8080
           env_vars: |
             BRUSSELS_MOBILITY_TWIN_KEY=${{ secrets.BRUSSELS_MOBILITY_TWIN_KEY }}
