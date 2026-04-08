@@ -1,0 +1,43 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: mobility-twin-norse
+  REGION: europe-west1
+  SERVICE: mobility-twin
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          source: .
+          region: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
+          flags: |
+            --memory=2Gi
+            --cpu=1
+            --min-instances=0
+            --max-instances=3
+            --concurrency=1
+            --timeout=300
+            --port=8080
+          env_vars: |
+            BRUSSELS_MOBILITY_TWIN_KEY=${{ secrets.BRUSSELS_MOBILITY_TWIN_KEY }}
