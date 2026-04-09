@@ -2,6 +2,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ScatterplotLayer } from "@deck.gl/layers";
+import type { Layer } from "@deck.gl/core";
 import { Bus } from "lucide-react";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
@@ -15,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
-import { colorToRGBA } from "@/lib/layers";
+import { colorToRGBA, heatmapLayer } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
 import { fmt, today } from "@/lib/utils";
 
@@ -31,6 +32,8 @@ interface MultimodalData {
   stations?: { name: string; lat: number; lon: number; duration: number; operator: string }[];
   error?: string;
 }
+
+type ViewMode = "stations" | "gradient";
 
 const ALL_OPS = ["SNCB", "De Lijn", "STIB", "TEC"];
 const OP_COLORS: Record<string, [number, number, number, number]> = {
@@ -51,6 +54,7 @@ function MultimodalPage() {
   const [travelDate, setTravelDate] = useState(today());
   const [transferDist, setTransferDist] = useState(400);
   const [maxWalk, setMaxWalk] = useState(1.5);
+  const [viewMode, setViewMode] = useState<ViewMode>("stations");
   const [address, setAddress] = useState("");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
   const mapRef = useRef<DeckMapRef>(null);
@@ -77,10 +81,46 @@ function MultimodalPage() {
     }
   }, [data]);
 
-  const layers = useMemo(() => {
+  const layers = useMemo((): Layer[] => {
     if (!data || data.error) return [];
 
-    const result: ScatterplotLayer[] = [];
+    const maxDur = timeBudget * 60;
+
+    if (viewMode === "gradient") {
+      const result: Layer[] = [];
+
+      if (data.stations?.length) {
+        result.push(
+          heatmapLayer("multimodal-heat", data.stations, {
+            positionFn: (d) => [d.lon, d.lat],
+            weightFn: (d) => Math.max(0, 1 - d.duration / maxDur),
+            radiusPixels: 40,
+            intensity: 2,
+            threshold: 0.03,
+          }),
+        );
+      }
+
+      if (data.origin) {
+        result.push(
+          new ScatterplotLayer({
+            id: "multimodal-origin-gradient",
+            data: [data.origin],
+            getPosition: (d) => [d.lon, d.lat],
+            getRadius: 8,
+            getFillColor: [227, 26, 28, 230],
+            radiusMinPixels: 7,
+            radiusMaxPixels: 14,
+            pickable: true,
+          }),
+        );
+      }
+
+      return result;
+    }
+
+    // Stations view
+    const result: Layer[] = [];
 
     if (data.stations?.length) {
       result.push(
@@ -129,7 +169,7 @@ function MultimodalPage() {
     }
 
     return result;
-  }, [data, timeBudget, maxWalk, selectedOps]);
+  }, [data, viewMode, timeBudget, maxWalk, selectedOps]);
 
   return (
     <Layout
@@ -145,6 +185,16 @@ function MultimodalPage() {
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="border-t border-border/40 pt-3 mt-3">
+            <Label>View</Label>
+            <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="mt-1.5">
+              <TabsList className="w-full">
+                <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
+                <TabsTrigger value="gradient" className="flex-1">Gradient</TabsTrigger>
+              </TabsList>
+            </Tabs>
           </div>
 
           <div className="border-t border-border/40 pt-3 mt-3 space-y-2">

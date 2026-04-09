@@ -2,6 +2,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ScatterplotLayer } from "@deck.gl/layers";
+import type { Layer } from "@deck.gl/core";
 import { Timer, X } from "lucide-react";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
@@ -17,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
-import { colorToRGBA } from "@/lib/layers";
+import { colorToRGBA, heatmapLayer } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
 
@@ -84,10 +85,33 @@ function DurationPage() {
 
   const mileLabel = direction === "to" ? "First-mile transport" : "Last-mile transport";
 
-  const layers = useMemo(() => {
-    if (!data || data.error || viewMode !== "stations") return [];
+  const layers = useMemo((): Layer[] => {
+    if (!data || data.error) return [];
 
     const maxDur = timeBudget * 60;
+
+    if (viewMode === "gradient") {
+      const heat = heatmapLayer("duration-heat", data.stations, {
+        positionFn: (d) => [d.lon, d.lat],
+        weightFn: (d) => Math.max(0, 1 - d.duration / maxDur),
+        radiusPixels: 40,
+        intensity: 2,
+        threshold: 0.03,
+      });
+
+      const destLayer = new ScatterplotLayer({
+        id: "duration-destinations-gradient",
+        data: data.dest_coords || [],
+        getPosition: (d) => [d.lon, d.lat],
+        getRadius: 10,
+        getFillColor: [227, 26, 28, 230],
+        radiusMinPixels: 8,
+        radiusMaxPixels: 14,
+        pickable: true,
+      });
+
+      return [heat, destLayer] as Layer[];
+    }
 
     const stationsLayer = new ScatterplotLayer({
       id: "duration-stations",
@@ -115,7 +139,7 @@ function DurationPage() {
       pickable: true,
     });
 
-    return [stationsLayer, destLayer];
+    return [stationsLayer, destLayer] as Layer[];
   }, [data, viewMode, timeBudget]);
 
   return (
@@ -217,15 +241,7 @@ function DurationPage() {
             <MetricCard label="Max" value={fmt(data.max_duration, 0)} suffix=" min" />
           </div>
 
-          {viewMode === "stations" && (
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
-          )}
-
-          {viewMode === "gradient" && (
-            <div className="flex items-center justify-center h-[calc(100vh-20rem)] rounded-2xl border border-border/50 bg-muted/20">
-              <p className="text-muted-foreground text-sm">Gradient view coming soon</p>
-            </div>
-          )}
+          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
         </>
       )}
 

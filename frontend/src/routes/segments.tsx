@@ -16,7 +16,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
-import { stationLayer, segmentLayer, colorToRGBA } from "@/lib/layers";
+import { stationLayer, segmentLayer, choroplethLayer, colorToRGBA } from "@/lib/layers";
+import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
 
 export const segmentsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -46,11 +47,60 @@ function SegmentsPage() {
     enabled: !!queryParams,
   });
 
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
   const loadData = () => setQueryParams(filterParams(filters));
 
   const layers = useMemo<Layer[]>(() => {
     if (!data || data.error) return [];
-    if (viewMode === "provinces" || viewMode === "regions") return [];
+
+    if (viewMode === "provinces" && geoData) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.freq,
+      );
+      const valueMap = new Map<string, number>();
+      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("province-choropleth", enriched, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
+
+    if (viewMode === "regions" && geoData) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.freq,
+      );
+      const regionAgg = new Map<string, { sum: number; count: number }>();
+      for (const [province, agg] of byProvince) {
+        const region = getRegion(province);
+        const existing = regionAgg.get(region);
+        if (existing) {
+          existing.sum += agg.sum;
+          existing.count += agg.count;
+        } else {
+          regionAgg.set(region, { sum: agg.sum, count: agg.count });
+        }
+      }
+      const valueMap = new Map<string, number>();
+      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("region-choropleth", regionGeo, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
 
     if (viewMode === "segments") {
       const segs = data.segments;
@@ -93,7 +143,7 @@ function SegmentsPage() {
     });
 
     return [layer] as Layer[];
-  }, [data, viewMode]);
+  }, [data, geoData, viewMode]);
 
   return (
     <Layout
@@ -127,13 +177,7 @@ function SegmentsPage() {
       {isFetching && <LoadingState message="Loading GTFS data..." />}
       {!isFetching && !data && <EmptyState icon={Train} />}
 
-      {data && !data.error && !isFetching && (viewMode === "provinces" || viewMode === "regions") && (
-        <div className="flex items-center justify-center h-[calc(100vh-14rem)] rounded-2xl border border-border/50 bg-muted/20">
-          <p className="text-muted-foreground text-sm">View mode coming soon</p>
-        </div>
-      )}
-
-      {data && !data.error && !isFetching && (viewMode === "segments" || viewMode === "stations") && (
+      {data && !data.error && !isFetching && (
         <>
           <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
           {viewMode === "stations" && (

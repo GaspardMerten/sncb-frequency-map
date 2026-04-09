@@ -123,6 +123,12 @@ def _parse_hour(time_str: str) -> int:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
+@router.get("/provinces")
+async def api_provinces():
+    """Return Belgium provinces GeoJSON."""
+    return JSONResponse(content=load_provinces_geojson())
+
 @router.get("/segments")
 async def api_segments(
     start: str | None = None,
