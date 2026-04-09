@@ -120,8 +120,12 @@ def load_gtfs_data(
         stop_lookup.update(build_stop_lookup(feed))
         served_stations |= compute_served_stations(feed, sids, hour_filter)
 
+        # Compute raw segment counts (no service_day_counts weighting —
+        # the library normalises internally when sdc is passed, producing
+        # tiny fractions).  We accumulate raw counts and divide by
+        # day_count later for proper daily averages.
         for k, v in compute_segment_frequencies(
-            feed, sids, hour_filter, day_count=1, service_day_counts=sdc,
+            feed, sids, hour_filter, day_count=1,
         ).items():
             seg_freqs[k] += v
 
