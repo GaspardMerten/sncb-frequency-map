@@ -83,7 +83,7 @@ function PunctualityPage() {
       sidebar={
         <>
           <div><Label>Date</Label><Input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="h-8 text-xs mt-1.5" /></div>
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <Label>Delay Metric</Label>
             <Tabs value={metric} onValueChange={(v) => setMetric(v as "departure" | "arrival")} className="mt-1.5">
               <TabsList className="w-full">
@@ -92,30 +92,30 @@ function PunctualityPage() {
               </TabsList>
             </Tabs>
           </div>
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Filters</Label>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Hour window</Label>
+              <Label className="text-[10px] text-muted-foreground/60 normal-case tracking-normal font-medium">Hour window</Label>
               <div className="flex items-center gap-2">
                 <Input type="number" value={hourStart} min={0} max={24} onChange={(e) => setHourStart(+e.target.value)} className="w-16 h-8 text-xs" />
-                <span className="text-xs text-muted-foreground">to</span>
+                <span className="text-xs text-muted-foreground/50">to</span>
                 <Input type="number" value={hourEnd} min={0} max={24} onChange={(e) => setHourEnd(+e.target.value)} className="w-16 h-8 text-xs" />
               </div>
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Min trains per station</Label>
+              <Label className="text-[10px] text-muted-foreground/60 normal-case tracking-normal font-medium">Min trains per station</Label>
               <Input type="number" value={minTrains} min={1} max={100} onChange={(e) => setMinTrains(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Min delay (min)</Label>
+              <Label className="text-[10px] text-muted-foreground/60 normal-case tracking-normal font-medium">Min delay (min)</Label>
               <Input type="number" value={delayFloor} min={0} max={120} onChange={(e) => setDelayFloor(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Delay cap (min)</Label>
+              <Label className="text-[10px] text-muted-foreground/60 normal-case tracking-normal font-medium">Delay cap (min)</Label>
               <Input type="number" value={delayCap} min={1} max={120} onChange={(e) => setDelayCap(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div className="flex items-center justify-between pt-1">
-              <Label className="text-[10px] text-muted-foreground">Exclude out-of-range</Label>
+              <Label className="text-[10px] text-muted-foreground/60 normal-case tracking-normal font-medium">Exclude out-of-range</Label>
               <Switch checked={excludeOutliers} onCheckedChange={setExcludeOutliers} />
             </div>
           </div>
@@ -124,7 +124,7 @@ function PunctualityPage() {
       }
     >
       {data && !data.error && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
           <MetricCard label="Stations" value={fmt(data.summary.n_stations)} />
           <MetricCard label="Avg Delay" value={data.summary.avg_delay} suffix=" min" />
           <MetricCard label="Median Delay" value={data.summary.median_delay} suffix=" min" />
@@ -156,8 +156,8 @@ function PunctualityPage() {
             />
           </div>
 
-          <div className="mt-4 rounded-xl border border-border bg-card p-4 shadow-sm">
-            <h3 className="text-sm font-semibold mb-1">Hourly Delay Analysis</h3>
+          <div className="mt-4 rounded-2xl border border-border/50 bg-card p-5 shadow-sm animate-slide-up">
+            <h3 className="text-sm font-semibold mb-1 text-foreground">Hourly Delay Analysis</h3>
             <p className="text-xs text-muted-foreground">Hourly analysis requires per-train data not available from the current station-level API response.</p>
           </div>
         </>

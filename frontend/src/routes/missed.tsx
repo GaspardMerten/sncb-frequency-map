@@ -84,19 +84,19 @@ function MissedPage() {
           <div>
             <Label>Date Range</Label>
             <div className="grid grid-cols-2 gap-2 mt-1.5">
-              <div><span className="text-[10px] text-muted-foreground">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
-              <div><span className="text-[10px] text-muted-foreground">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Connection Settings</Label>
-            <div><span className="text-[10px] text-muted-foreground">Min transfer time (min)</span><Input type="number" value={minTransfer} min={1} max={10} onChange={(e) => setMinTransfer(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Max transfer time (min)</span><Input type="number" value={maxTransfer} min={5} max={60} onChange={(e) => setMaxTransfer(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min transfer time (min)</span><Input type="number" value={minTransfer} min={1} max={10} onChange={(e) => setMinTransfer(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Max transfer time (min)</span><Input type="number" value={maxTransfer} min={5} max={60} onChange={(e) => setMaxTransfer(+e.target.value)} className="h-8 text-xs" /></div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Hour window</span>
-              <div className="flex items-center gap-2"><Input type="number" value={hourStart} min={0} max={24} onChange={(e) => setHourStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground">to</span><Input type="number" value={hourEnd} min={0} max={24} onChange={(e) => setHourEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
+              <span className="text-[10px] text-muted-foreground/60">Hour window</span>
+              <div className="flex items-center gap-2"><Input type="number" value={hourStart} min={0} max={24} onChange={(e) => setHourStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground/50">to</span><Input type="number" value={hourEnd} min={0} max={24} onChange={(e) => setHourEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
             </div>
-            <div><span className="text-[10px] text-muted-foreground">Min planned connections</span><Input type="number" value={minConnections} min={1} max={100} onChange={(e) => setMinConnections(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min planned connections</span><Input type="number" value={minConnections} min={1} max={100} onChange={(e) => setMinConnections(+e.target.value)} className="h-8 text-xs" /></div>
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Analyse" />
         </>
@@ -107,7 +107,7 @@ function MissedPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Total Connections" value={fmt(data.total_connections)} />
             <MetricCard label="Missed" value={fmt(data.total_missed)} danger />
             <MetricCard label="% Missed" value={data.pct_missed} suffix="%" danger={data.pct_missed > 10} />
@@ -117,17 +117,17 @@ function MissedPage() {
             <div className="xl:col-span-2 space-y-4">
               <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-22rem)]" />
               {top10Stations.length > 0 && (
-                <div className="bg-card rounded-xl border border-border p-4">
-                  <h3 className="text-sm font-semibold text-foreground mb-3">Top 10 Worst Stations</h3>
+                <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
+                  <h3 className="text-sm font-semibold text-foreground mb-4">Top 10 Worst Stations</h3>
                   <ResponsiveContainer width="100%" height={200}>
                     <BarChart data={top10Stations} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
                       <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" height={50} />
                       <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
                       <Tooltip
-                        contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                        contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
                         formatter={(value: number) => [`${value} missed`, "Count"]}
                       />
-                      <Bar dataKey="missed" fill="oklch(0.55 0.2 25)" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="missed" fill="oklch(0.58 0.22 25)" radius={[6, 6, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>

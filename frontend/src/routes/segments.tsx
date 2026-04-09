@@ -100,7 +100,7 @@ function SegmentsPage() {
       sidebar={
         <>
           <div>
-            <p className="text-[11px] font-semibold text-primary uppercase tracking-wider mb-2">View</p>
+            <p className="text-[10px] font-semibold text-foreground/40 uppercase tracking-widest mb-2">View</p>
             <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as typeof viewMode)}>
               <TabsList className="w-full">
                 <TabsTrigger value="segments" className="flex-1">Segments</TabsTrigger>
@@ -116,7 +116,7 @@ function SegmentsPage() {
       }
     >
       {data && !data.error && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
           <MetricCard label="Segments" value={fmt(data.segments.length)} />
           <MetricCard label="Stations" value={fmt(data.stations.length)} />
           <MetricCard label="Busiest" value={data.stations[0]?.name ?? "\u2014"} suffix="/day" />
@@ -128,7 +128,7 @@ function SegmentsPage() {
       {!isFetching && !data && <EmptyState icon={Train} />}
 
       {data && !data.error && !isFetching && (viewMode === "provinces" || viewMode === "regions") && (
-        <div className="flex items-center justify-center h-[calc(100vh-14rem)] rounded-xl border border-border bg-muted/30">
+        <div className="flex items-center justify-center h-[calc(100vh-14rem)] rounded-2xl border border-border/50 bg-muted/20">
           <p className="text-muted-foreground text-sm">View mode coming soon</p>
         </div>
       )}
@@ -137,7 +137,7 @@ function SegmentsPage() {
         <>
           <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
           {viewMode === "stations" && (
-            <div className="mt-4">
+            <div className="mt-4 animate-slide-up">
               <DataTable
                 title="Top Stations by Frequency"
                 keyFn={(s) => s.id}

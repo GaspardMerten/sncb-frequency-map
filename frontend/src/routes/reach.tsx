@@ -81,7 +81,6 @@ function ReachPage() {
 
     const result: Layer[] = [];
 
-    // Base station layer
     result.push(
       stationLayer("reach-stations", stations, {
         positionFn: (d) => [d.lon, d.lat],
@@ -96,7 +95,6 @@ function ReachPage() {
     if (selectedStation) {
       const s = stations.find((x) => x.id === selectedStation);
       if (s) {
-        // Highlight selected station in red
         result.push(
           stationLayer("reach-selected", [s], {
             positionFn: (d) => [d.lon, d.lat],
@@ -108,7 +106,6 @@ function ReachPage() {
           }) as Layer,
         );
 
-        // Destination stations
         if (s.destinations && s.destinations.length) {
           result.push(
             stationLayer("reach-destinations", s.destinations, {
@@ -134,27 +131,27 @@ function ReachPage() {
           <div className="space-y-2">
             <Label>Reach Settings</Label>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Time budget (hours)</Label>
+              <span className="text-[10px] text-muted-foreground/60">Time budget (hours)</span>
               <Input type="number" value={timeBudget} min={0.5} max={6} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Departure window</Label>
+              <span className="text-[10px] text-muted-foreground/60">Departure window</span>
               <div className="flex items-center gap-2">
                 <Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" />
-                <span className="text-xs text-muted-foreground">to</span>
+                <span className="text-xs text-muted-foreground/50">to</span>
                 <Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" />
               </div>
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Max transfers</Label>
+              <span className="text-[10px] text-muted-foreground/60">Max transfers</span>
               <Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Min transfer time (min)</Label>
+              <span className="text-[10px] text-muted-foreground/60">Min transfer time (min)</span>
               <Input type="number" value={minTransferTime} min={0} max={15} onChange={(e) => setMinTransferTime(+e.target.value)} className="h-8 text-xs" />
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <FilterPanel filters={filters} onChange={setFilters} />
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Compute Reachability" loadingLabel="Computing..." />
@@ -162,7 +159,7 @@ function ReachPage() {
       }
     >
       {data && !data.error && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
           <MetricCard label="Stations" value={fmt(data.stations.length)} />
           <MetricCard label="Max Reachable" value={fmt(data.max_reachable)} />
           <MetricCard label="Avg Reachable" value={fmt(data.avg_reachable, 1)} />
@@ -190,7 +187,7 @@ function ReachPage() {
               </div>
               <div>
                 <div className="mb-3">
-                  <Label className="text-[10px] text-muted-foreground block mb-1">Highlight station</Label>
+                  <span className="text-[10px] text-muted-foreground/60 block mb-1">Highlight station</span>
                   <Select value={selectedStation} onValueChange={handleSelectStation}>
                     <SelectOption value="">All stations</SelectOption>
                     {data.stations.map((s) => <SelectOption key={s.id} value={s.id}>{s.name} ({s.reachable})</SelectOption>)}
@@ -211,13 +208,13 @@ function ReachPage() {
           )}
 
           {viewMode === "provinces" && (
-            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
+            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm rounded-2xl border border-border/50 bg-muted/20">
               View mode coming soon
             </div>
           )}
 
           {viewMode === "regions" && (
-            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
+            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm rounded-2xl border border-border/50 bg-muted/20">
               View mode coming soon
             </div>
           )}

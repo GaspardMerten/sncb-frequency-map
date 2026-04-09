@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 
 interface ApplyButtonProps {
   loading: boolean;
@@ -10,15 +10,18 @@ interface ApplyButtonProps {
 
 export function ApplyButton({ loading, onClick, label = "Apply Filters", loadingLabel = "Computing..." }: ApplyButtonProps) {
   return (
-    <div className="border-t border-border pt-3 mt-3">
-      <Button onClick={onClick} disabled={loading} className="w-full" size="sm">
+    <div className="pt-3 mt-3 border-t border-border/40">
+      <Button onClick={onClick} disabled={loading} className="w-full h-10 rounded-xl text-sm font-semibold" size="default">
         {loading ? (
           <>
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
             {loadingLabel}
           </>
         ) : (
-          label
+          <>
+            <Sparkles className="w-3.5 h-3.5" />
+            {label}
+          </>
         )}
       </Button>
     </div>

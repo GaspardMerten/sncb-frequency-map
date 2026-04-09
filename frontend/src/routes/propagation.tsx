@@ -79,20 +79,20 @@ function PropagationPage() {
               </Tabs>
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <Label>Date Range</Label>
             <div className="grid grid-cols-2 gap-2 mt-1.5">
-              <div><span className="text-[10px] text-muted-foreground">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
-              <div><span className="text-[10px] text-muted-foreground">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Thresholds</Label>
-            <div><span className="text-[10px] text-muted-foreground">Min delay increase (sec)</span><Input type="number" value={minIncrease} min={0} max={600} onChange={(e) => setMinIncrease(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Min incidents</span><Input type="number" value={minIncidents} min={1} max={100} onChange={(e) => setMinIncidents(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min delay increase (sec)</span><Input type="number" value={minIncrease} min={0} max={600} onChange={(e) => setMinIncrease(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min incidents</span><Input type="number" value={minIncidents} min={1} max={100} onChange={(e) => setMinIncidents(+e.target.value)} className="h-8 text-xs" /></div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Hour window</span>
-              <div className="flex items-center gap-2"><Input type="number" value={hourStart} min={0} max={24} onChange={(e) => setHourStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground">to</span><Input type="number" value={hourEnd} min={0} max={24} onChange={(e) => setHourEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
+              <span className="text-[10px] text-muted-foreground/60">Hour window</span>
+              <div className="flex items-center gap-2"><Input type="number" value={hourStart} min={0} max={24} onChange={(e) => setHourStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground/50">to</span><Input type="number" value={hourEnd} min={0} max={24} onChange={(e) => setHourEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
             </div>
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Analyse" />
@@ -104,7 +104,7 @@ function PropagationPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Delay Events" value={fmt(data.n_events)} />
             <MetricCard label="Stations Involved" value={fmt(data.n_stations)} />
             <MetricCard label="Total Delay Added" value={fmt(data.total_delay_min, 0)} suffix="min" />

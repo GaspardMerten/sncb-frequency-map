@@ -32,7 +32,7 @@ export function TabsList({ children, className }: TabsListProps) {
   return (
     <div
       role="tablist"
-      className={cn("inline-flex items-center gap-1 rounded-lg bg-muted p-1", className)}
+      className={cn("inline-flex items-center gap-0.5 rounded-xl bg-muted/80 p-1 border border-border/40", className)}
     >
       {children}
     </div>
@@ -58,12 +58,12 @@ export function TabsTrigger({ value, children, className, disabled }: TabsTrigge
       disabled={disabled}
       onClick={() => ctx.onValueChange(value)}
       className={cn(
-        "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all",
+        "inline-flex items-center justify-center whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-200",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        "disabled:pointer-events-none disabled:opacity-50",
+        "disabled:pointer-events-none disabled:opacity-50 cursor-pointer",
         isActive
-          ? "bg-card text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground",
+          ? "bg-card text-foreground shadow-sm border border-border/30"
+          : "text-muted-foreground hover:text-foreground hover:bg-white/50",
         className,
       )}
     >

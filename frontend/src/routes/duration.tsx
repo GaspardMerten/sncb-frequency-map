@@ -131,7 +131,7 @@ function DurationPage() {
               </TabsList>
             </Tabs>
           </div>
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <Label>Aggregation</Label>
             <Tabs value={aggregation} onValueChange={(v) => setAggregation(v as Aggregation)} className="mt-1.5">
               <TabsList className="w-full">
@@ -141,7 +141,7 @@ function DurationPage() {
               </TabsList>
             </Tabs>
           </div>
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <Label>View</Label>
             <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="mt-1.5">
               <TabsList className="w-full">
@@ -151,7 +151,7 @@ function DurationPage() {
             </Tabs>
           </div>
           {viewMode === "gradient" && (
-            <div className="border-t border-border pt-3 mt-3">
+            <div className="border-t border-border/40 pt-3 mt-3">
               <Label>{mileLabel}</Label>
               <Tabs value={transportMode} onValueChange={(v) => setTransportMode(v as TransportMode)} className="mt-1.5">
                 <TabsList className="w-full">
@@ -160,37 +160,37 @@ function DurationPage() {
                   <TabsTrigger value="car" className="flex-1">Car</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <p className="text-[10px] text-muted-foreground mt-1">
+              <p className="text-[10px] text-muted-foreground/60 mt-1">
                 Speed: {TRANSPORT_SPEEDS[transportMode]} km/h
               </p>
             </div>
           )}
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Settings</Label>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Time budget (hours)</Label>
+              <span className="text-[10px] text-muted-foreground/60">Time budget (hours)</span>
               <Input type="number" value={timeBudget} min={0.5} max={6} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Departure window</Label>
+              <span className="text-[10px] text-muted-foreground/60">Departure window</span>
               <div className="flex items-center gap-2">
                 <Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" />
-                <span className="text-xs text-muted-foreground">to</span>
+                <span className="text-xs text-muted-foreground/50">to</span>
                 <Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" />
               </div>
             </div>
             <div>
-              <Label className="text-[10px] text-muted-foreground">Max transfers</Label>
+              <span className="text-[10px] text-muted-foreground/60">Max transfers</span>
               <Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" />
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3"><FilterPanel filters={filters} onChange={setFilters} /></div>
+          <div className="border-t border-border/40 pt-3 mt-3"><FilterPanel filters={filters} onChange={setFilters} /></div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Compute" />
         </>
       }
     >
-      <div className="mb-4">
-        <span className="text-xs text-muted-foreground block mb-1">Destination station(s)</span>
+      <div className="mb-5">
+        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-widest font-medium block mb-1.5">Destination station(s)</span>
         <div className="flex gap-2">
           <Input value={destSearch} onChange={(e) => setDestSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addDest()} placeholder="Search station..." className="max-w-sm text-sm" />
           <Button size="sm" variant="secondary" onClick={addDest}>Add</Button>
@@ -199,7 +199,7 @@ function DurationPage() {
           {selectedDests.map((d) => (
             <Badge key={d} variant="secondary" className="gap-1 pr-1">
               {d}
-              <button onClick={() => setSelectedDests(selectedDests.filter((x) => x !== d))} className="hover:text-destructive"><X className="w-3 h-3" /></button>
+              <button onClick={() => setSelectedDests(selectedDests.filter((x) => x !== d))} className="hover:text-destructive cursor-pointer"><X className="w-3 h-3" /></button>
             </Badge>
           ))}
         </div>
@@ -210,7 +210,7 @@ function DurationPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Stations" value={fmt(data.stations.length)} />
             <MetricCard label="Avg Duration" value={fmt(data.avg_duration, 0)} suffix=" min" />
             <MetricCard label="Min" value={fmt(data.min_duration, 0)} suffix=" min" />
@@ -222,7 +222,7 @@ function DurationPage() {
           )}
 
           {viewMode === "gradient" && (
-            <div className="flex items-center justify-center h-[calc(100vh-20rem)] rounded-xl border border-border bg-muted/30">
+            <div className="flex items-center justify-center h-[calc(100vh-20rem)] rounded-2xl border border-border/50 bg-muted/20">
               <p className="text-muted-foreground text-sm">Gradient view coming soon</p>
             </div>
           )}

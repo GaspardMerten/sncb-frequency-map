@@ -33,23 +33,23 @@ function HourStepper({
 }) {
   const clamp = (v: number) => Math.max(0, Math.min(24, v));
   return (
-    <div className="flex flex-col items-center gap-1">
-      <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+    <div className="flex flex-col items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60 font-medium">
         {label}
       </span>
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2">
         <button
           onClick={() => onChange(clamp(value - 1))}
-          className="flex h-6 w-6 items-center justify-center rounded-md border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95 cursor-pointer"
+          className="flex h-7 w-7 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground transition-all hover:bg-muted hover:text-foreground hover:border-border active:scale-90 cursor-pointer"
         >
           <Minus className="h-3 w-3" />
         </button>
-        <span className="w-10 text-center text-sm font-semibold tabular-nums text-foreground">
+        <span className="w-10 text-center text-sm font-bold tabular-nums text-foreground">
           {value}h
         </span>
         <button
           onClick={() => onChange(clamp(value + 1))}
-          className="flex h-6 w-6 items-center justify-center rounded-md border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95 cursor-pointer"
+          className="flex h-7 w-7 items-center justify-center rounded-lg border border-border/60 bg-card text-muted-foreground transition-all hover:bg-muted hover:text-foreground hover:border-border active:scale-90 cursor-pointer"
         >
           <Plus className="h-3 w-3" />
         </button>
@@ -71,15 +71,15 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
     onChange({ ...filters, [key]: value });
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3.5">
       {/* Date Range */}
       <div>
-        <Label className="text-xs font-semibold tracking-wide">
+        <Label className="text-[11px] font-semibold tracking-wide text-foreground/70">
           Date Range
         </Label>
         <div className="grid grid-cols-2 gap-2 mt-2">
           <div className="space-y-1">
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60 font-medium">
               From
             </span>
             <Input
@@ -90,7 +90,7 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
             />
           </div>
           <div className="space-y-1">
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground/60 font-medium">
               To
             </span>
             <Input
@@ -103,12 +103,11 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
         </div>
       </div>
 
-      {/* Divider */}
-      <div className="border-t border-border/50" />
+      <div className="border-t border-border/40" />
 
       {/* Days of Week */}
       <div>
-        <Label className="text-xs font-semibold tracking-wide">
+        <Label className="text-[11px] font-semibold tracking-wide text-foreground/70">
           Days of Week
         </Label>
         <div className="flex gap-1.5 mt-2">
@@ -117,10 +116,10 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
               key={i}
               onClick={() => toggleWeekday(i)}
               className={cn(
-                "w-9 h-9 rounded-lg text-[11px] transition-all duration-150 cursor-pointer",
+                "flex-1 h-9 rounded-lg text-[11px] transition-all duration-200 cursor-pointer",
                 filters.weekdays.includes(i)
-                  ? "bg-primary text-primary-foreground shadow-sm font-bold active:scale-90"
-                  : "bg-card text-muted-foreground border border-border hover:border-primary/40 hover:text-foreground font-medium active:scale-95",
+                  ? "bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm shadow-primary/20 font-bold active:scale-90"
+                  : "bg-card text-muted-foreground border border-border/60 hover:border-primary/30 hover:text-foreground font-medium active:scale-95",
               )}
             >
               {day}
@@ -129,14 +128,13 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
         </div>
       </div>
 
-      {/* Divider */}
-      <div className="border-t border-border/50" />
+      <div className="border-t border-border/40" />
 
       {/* Holidays */}
       <div className="space-y-2.5">
-        <Label className="text-xs font-semibold tracking-wide">Holidays</Label>
+        <Label className="text-[11px] font-semibold tracking-wide text-foreground/70">Holidays</Label>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-foreground/70">
+          <span className="text-xs text-foreground/60">
             Exclude public holidays
           </span>
           <Switch
@@ -145,7 +143,7 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
           />
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-foreground/70">
+          <span className="text-xs text-foreground/60">
             Exclude school holidays
           </span>
           <Switch
@@ -155,29 +153,28 @@ export function FilterPanel({ filters, onChange }: FilterPanelProps) {
         </div>
       </div>
 
-      {/* Divider */}
-      <div className="border-t border-border/50" />
+      <div className="border-t border-border/40" />
 
       {/* Time of Day */}
       <div className="space-y-2.5">
-        <Label className="text-xs font-semibold tracking-wide">
+        <Label className="text-[11px] font-semibold tracking-wide text-foreground/70">
           Time of Day
         </Label>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-foreground/70">Filter by hour</span>
+          <span className="text-xs text-foreground/60">Filter by hour</span>
           <Switch
             checked={filters.useHour}
             onCheckedChange={(checked) => set("useHour", checked)}
           />
         </div>
         {filters.useHour && (
-          <div className="flex items-center justify-center gap-4 rounded-lg border border-border/50 bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-center gap-4 rounded-xl border border-border/40 bg-muted/30 px-4 py-3.5">
             <HourStepper
               value={filters.hourStart}
               onChange={(v) => set("hourStart", v)}
               label="From"
             />
-            <div className="mt-4 text-xs font-medium text-muted-foreground">
+            <div className="mt-5 text-xs font-medium text-muted-foreground/50">
               —
             </div>
             <HourStepper

@@ -89,7 +89,7 @@ export const DeckMap = forwardRef<DeckMapRef, DeckMapProps>(
         ref={containerRef}
         id={id}
         className={cn(
-          "w-full rounded-xl border border-border shadow-sm overflow-hidden",
+          "w-full rounded-2xl border border-border/60 shadow-sm overflow-hidden",
           className,
         )}
         style={{ height: "100%" }}

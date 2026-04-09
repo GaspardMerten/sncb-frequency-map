@@ -71,7 +71,6 @@ function MultimodalPage() {
 
   const toggleOp = (op: string) => setSelectedOps((prev) => prev.includes(op) ? prev.filter((o) => o !== op) : [...prev, op]);
 
-  // Fly to origin when data loads
   useEffect(() => {
     if (data?.origin) {
       mapRef.current?.flyTo({ longitude: data.origin.lon, latitude: data.origin.lat, zoom: 11 });
@@ -82,9 +81,7 @@ function MultimodalPage() {
     if (!data || data.error) return [];
 
     const result: ScatterplotLayer[] = [];
-    const maxDur = timeBudget * 60;
 
-    // Station dots colored by operator
     if (data.stations?.length) {
       result.push(
         new ScatterplotLayer({
@@ -96,14 +93,11 @@ function MultimodalPage() {
           radiusMinPixels: 4,
           radiusMaxPixels: 8,
           pickable: true,
-          updateTriggers: {
-            getFillColor: [selectedOps],
-          },
+          updateTriggers: { getFillColor: [selectedOps] },
         }),
       );
     }
 
-    // Walking radius circle
     if (data.origin) {
       result.push(
         new ScatterplotLayer({
@@ -116,13 +110,10 @@ function MultimodalPage() {
           stroked: true,
           getLineColor: [227, 26, 28, 80],
           lineWidthMinPixels: 1,
-          updateTriggers: {
-            getRadius: [maxWalk],
-          },
+          updateTriggers: { getRadius: [maxWalk] },
         }),
       );
 
-      // Origin marker (big red dot)
       result.push(
         new ScatterplotLayer({
           id: "multimodal-origin",
@@ -148,7 +139,7 @@ function MultimodalPage() {
             <Label>Operators</Label>
             <div className="space-y-1.5 mt-1.5">
               {ALL_OPS.map((op) => (
-                <div key={op} className="flex items-center justify-between text-xs text-foreground/70">
+                <div key={op} className="flex items-center justify-between text-xs text-foreground/60">
                   <span>{op}</span>
                   <Switch checked={selectedOps.includes(op)} onCheckedChange={() => toggleOp(op)} />
                 </div>
@@ -156,10 +147,10 @@ function MultimodalPage() {
             </div>
           </div>
 
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Travel Settings</Label>
             <div>
-              <span className="text-[10px] text-muted-foreground">Direction</span>
+              <span className="text-[10px] text-muted-foreground/60">Direction</span>
               <Tabs value={direction} onValueChange={(v) => setDirection(v as "from" | "to")}>
                 <TabsList className="w-full">
                   <TabsTrigger value="from" className="flex-1">From</TabsTrigger>
@@ -167,16 +158,16 @@ function MultimodalPage() {
                 </TabsList>
               </Tabs>
             </div>
-            <div><span className="text-[10px] text-muted-foreground">Time budget (hours)</span><Input type="number" value={timeBudget} min={0.5} max={4} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Time budget (hours)</span><Input type="number" value={timeBudget} min={0.5} max={4} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" /></div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Departure window</span>
-              <div className="flex items-center gap-2"><Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground">to</span><Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
+              <span className="text-[10px] text-muted-foreground/60">Departure window</span>
+              <div className="flex items-center gap-2"><Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" /><span className="text-xs text-muted-foreground/50">to</span><Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" /></div>
             </div>
-            <div><span className="text-[10px] text-muted-foreground">Max transfers</span><Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Transfer distance (m)</span><Input type="number" value={transferDist} min={100} max={1000} step={100} onChange={(e) => setTransferDist(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Max walk (km)</span><Input type="number" value={maxWalk} min={0.5} max={10} step={0.5} onChange={(e) => setMaxWalk(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Max transfers</span><Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Transfer distance (m)</span><Input type="number" value={transferDist} min={100} max={1000} step={100} onChange={(e) => setTransferDist(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Max walk (km)</span><Input type="number" value={maxWalk} min={0.5} max={10} step={0.5} onChange={(e) => setMaxWalk(+e.target.value)} className="h-8 text-xs" /></div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Last-mile mode</span>
+              <span className="text-[10px] text-muted-foreground/60">Last-mile mode</span>
               <Tabs value={lastMile} onValueChange={setLastMile}>
                 <TabsList className="w-full">
                   <TabsTrigger value="Walk" className="flex-1">Walk</TabsTrigger>
@@ -185,14 +176,14 @@ function MultimodalPage() {
                 </TabsList>
               </Tabs>
             </div>
-            <div><span className="text-[10px] text-muted-foreground">Date</span><Input type="date" value={travelDate} onChange={(e) => setTravelDate(e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Date</span><Input type="date" value={travelDate} onChange={(e) => setTravelDate(e.target.value)} className="h-8 text-xs" /></div>
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Compute" />
         </>
       }
     >
-      <div className="mb-4">
-        <span className="text-xs text-muted-foreground block mb-1">Address</span>
+      <div className="mb-5">
+        <span className="text-[10px] text-muted-foreground/60 uppercase tracking-widest font-medium block mb-1.5">Address</span>
         <Input value={address} onChange={(e) => setAddress(e.target.value)} onKeyDown={(e) => e.key === "Enter" && loadData()} placeholder="e.g. Rue de la Loi 1, Brussels" className="max-w-md text-sm" />
       </div>
 
@@ -201,7 +192,7 @@ function MultimodalPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Reachable Stops" value={fmt(data.n_reachable)} />
             <MetricCard label="Avg Duration" value={fmt(data.avg_duration, 0)} suffix="min" />
             <MetricCard label="Operators Used" value={data.operators_used} />

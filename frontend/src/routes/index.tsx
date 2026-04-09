@@ -4,7 +4,7 @@ import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { Badge } from "@/components/ui/badge";
 import { PAGES } from "@/lib/constants";
-import { Train } from "lucide-react";
+import { Train, ArrowRight, Database, Cpu, Eye } from "lucide-react";
 
 export const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -12,35 +12,46 @@ export const indexRoute = createRoute({
   component: HomePage,
 });
 
+const PIPELINE = [
+  { icon: Database, label: "Fetch GTFS snapshots", sub: "Daily data ingestion" },
+  { icon: Cpu, label: "Match & compute", sub: "Segment matching + frequencies" },
+  { icon: Eye, label: "Visualize", sub: "Interactive exploration" },
+];
+
 function HomePage() {
   return (
     <Layout
       sidebar={
         <>
-          <div className="text-center py-8">
-            <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-3">
-              <Train className="w-7 h-7 text-primary" />
+          <div className="text-center py-6">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary to-brand-700 flex items-center justify-center mx-auto mb-3 shadow-lg shadow-primary/20">
+              <Train className="w-7 h-7 text-white" />
             </div>
-            <h2 className="text-primary font-bold text-lg">SNCB Frequency Explorer</h2>
-            <p className="text-xs text-muted-foreground mt-1">Belgian rail & transit analytics</p>
+            <h2 className="font-bold text-base text-foreground tracking-tight">SNCB Explorer</h2>
+            <p className="text-[11px] text-muted-foreground mt-0.5">Belgian rail & transit analytics</p>
           </div>
 
-          <div className="space-y-1">
-            <p className="text-[11px] font-semibold text-primary uppercase tracking-wider mb-2">Data Sources</p>
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-semibold text-foreground/40 uppercase tracking-widest mb-2">Data Sources</p>
             <div className="flex flex-wrap gap-1.5">
-              <Badge className="bg-blue-100 text-blue-700 border-blue-200">GTFS</Badge>
-              <Badge className="bg-amber-100 text-amber-700 border-amber-200">Infrabel</Badge>
-              <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200">MobilityTwin</Badge>
+              <Badge className="bg-blue-50 text-blue-600 border-blue-100 font-medium text-[10px]">GTFS</Badge>
+              <Badge className="bg-amber-50 text-amber-600 border-amber-100 font-medium text-[10px]">Infrabel</Badge>
+              <Badge className="bg-emerald-50 text-emerald-600 border-emerald-100 font-medium text-[10px]">MobilityTwin</Badge>
             </div>
           </div>
 
-          <div className="space-y-1 pt-2">
-            <p className="text-[11px] font-semibold text-primary uppercase tracking-wider mb-2">Pipeline</p>
-            <div className="space-y-1.5 text-[11px] text-muted-foreground">
-              {["Fetch GTFS snapshots", "Match to Infrabel segments", "Compute frequencies & timetables", "BFS reachability analysis", "Interactive visualization"].map((step, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-[9px] font-bold shrink-0">{i + 1}</span>
-                  {step}
+          <div className="border-t border-border/40 pt-3 mt-3">
+            <p className="text-[10px] font-semibold text-foreground/40 uppercase tracking-widest mb-3">Pipeline</p>
+            <div className="space-y-3">
+              {PIPELINE.map((step, i) => (
+                <div key={i} className="flex items-start gap-2.5">
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary/15 to-primary/5 flex items-center justify-center shrink-0 mt-0.5">
+                    <step.icon className="w-3.5 h-3.5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-foreground/80 leading-tight">{step.label}</p>
+                    <p className="text-[10px] text-muted-foreground/60 leading-tight">{step.sub}</p>
+                  </div>
                 </div>
               ))}
             </div>
@@ -48,25 +59,34 @@ function HomePage() {
         </>
       }
     >
+      {/* Hero */}
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-foreground">Belgian Rail & Transit Analytics</h1>
-        <p className="text-sm text-muted-foreground mt-1">Explore train frequencies, station reachability, travel times, and punctuality across Belgium.</p>
+        <h1 className="text-3xl font-bold text-foreground tracking-tight">
+          Belgian Rail & Transit <span className="text-gradient">Analytics</span>
+        </h1>
+        <p className="text-sm text-muted-foreground mt-2 max-w-xl leading-relaxed">
+          Explore train frequencies, station reachability, travel times, and punctuality across Belgium's entire transit network.
+        </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {/* Page cards grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
         {PAGES.map((page) => (
           <Link
             key={page.slug}
             to={`/${page.slug}` as "/"}
-            className="group block bg-card rounded-xl border border-border p-5 hover:border-primary/30 hover:shadow-md transition-all duration-200"
+            className="group block rounded-2xl border border-border/50 bg-card p-5 transition-all duration-300 hover:shadow-lg hover:shadow-primary/[0.06] hover:border-primary/20 hover:-translate-y-0.5"
           >
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary group-hover:bg-primary/15 transition-colors shrink-0">
-                <page.icon className="w-5 h-5" />
+            <div className="flex items-start gap-3.5">
+              <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${page.gradient} flex items-center justify-center shrink-0 transition-transform duration-300 group-hover:scale-110`}>
+                <page.icon className="w-5 h-5 text-foreground/70" />
               </div>
-              <div>
-                <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors">{page.title}</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">{page.desc}</p>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-foreground tracking-tight group-hover:text-primary transition-colors duration-200">{page.title}</h3>
+                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground/30 group-hover:text-primary/60 transition-all duration-300 group-hover:translate-x-0.5" />
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{page.desc}</p>
               </div>
             </div>
           </Link>

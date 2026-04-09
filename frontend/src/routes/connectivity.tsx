@@ -95,7 +95,7 @@ function ConnectivityPage() {
     ] as Layer[];
   }, [filteredStations]);
 
-  const regionColors: Record<string, string> = { Brussels: "#e31a1c", Flanders: "#ff7f00", Wallonia: "#2171b5" };
+  const regionColors: Record<string, string> = { Brussels: "#e31a1c", Flanders: "#ff7f00", Wallonia: "#2557e6" };
 
   const scatterData = useMemo(() => {
     return Object.entries(regionColors).map(([region, color]) => ({
@@ -132,7 +132,7 @@ function ConnectivityPage() {
             if (!payload?.[0]) return null;
             const d = payload[0].payload;
             return (
-              <div className="bg-card border border-border rounded-lg px-3 py-2 text-xs shadow-md">
+              <div className="bg-card border border-border/50 rounded-xl px-3 py-2 text-xs shadow-lg">
                 <b>{d.name}</b><br />
                 {xLabel}={typeof d.x === "number" && d.x % 1 !== 0 ? d.x.toFixed(1) : d.x},
                 {yLabel}={typeof d.y === "number" && d.y % 1 !== 0 ? d.y.toFixed(1) : d.y}
@@ -161,36 +161,36 @@ function ConnectivityPage() {
           <div className="space-y-2">
             <Label>Settings</Label>
             <div>
-              <span className="text-[10px] text-muted-foreground">Time budget (hours)</span>
+              <span className="text-[10px] text-muted-foreground/60">Time budget (hours)</span>
               <Input type="number" value={timeBudget} min={0.5} max={6} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Max transfers</span>
+              <span className="text-[10px] text-muted-foreground/60">Max transfers</span>
               <Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" />
             </div>
             <div>
-              <span className="text-[10px] text-muted-foreground">Departure window</span>
+              <span className="text-[10px] text-muted-foreground/60">Departure window</span>
               <div className="flex items-center gap-2">
                 <Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" />
-                <span className="text-xs text-muted-foreground">to</span>
+                <span className="text-xs text-muted-foreground/50">to</span>
                 <Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" />
               </div>
             </div>
           </div>
 
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <Label>Station Size</Label>
             {[{ label: "Small (<4 trains/h)", checked: showSmall, set: setShowSmall },
               { label: "Medium (4-10 trains/h)", checked: showMedium, set: setShowMedium },
               { label: "Big (>=10 trains/h)", checked: showBig, set: setShowBig }].map((f) => (
-              <label key={f.label} className="flex items-center gap-2 text-xs text-foreground/70 cursor-pointer mt-1">
+              <label key={f.label} className="flex items-center gap-2 text-xs text-foreground/60 cursor-pointer mt-1.5">
                 <input type="checkbox" checked={f.checked} onChange={(e) => f.set(e.target.checked)} className="rounded border-border text-primary" />
                 {f.label}
               </label>
             ))}
           </div>
 
-          <div className="border-t border-border pt-3 mt-3">
+          <div className="border-t border-border/40 pt-3 mt-3">
             <FilterPanel filters={filters} onChange={setFilters} />
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Compute" />
@@ -202,7 +202,7 @@ function ConnectivityPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Total Stations" value={fmt(data.total)} />
             <MetricCard label="Small" value={fmt(data.n_small)} />
             <MetricCard label="Medium" value={fmt(data.n_medium)} />
@@ -210,9 +210,9 @@ function ConnectivityPage() {
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
             <DeckMap ref={mapRef} layers={layers} className="h-96" />
-            <div className="bg-card rounded-xl border border-border p-4 h-96">
+            <div className="bg-card rounded-2xl border border-border/50 p-5 h-96 shadow-sm">
               <Tabs value={scatterTab} onValueChange={setScatterTab} className="h-full flex flex-col">
-                <TabsList className="w-full mb-2">
+                <TabsList className="w-full mb-3">
                   <TabsTrigger value="ab" className="flex-1 text-xs">A x B</TabsTrigger>
                   <TabsTrigger value="bc" className="flex-1 text-xs">B x C</TabsTrigger>
                   <TabsTrigger value="ac" className="flex-1 text-xs">A x C</TabsTrigger>
@@ -226,7 +226,7 @@ function ConnectivityPage() {
             </div>
           </div>
 
-          <div className="bg-card rounded-xl border border-border p-4">
+          <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm">
             <Label className="mb-2 block">Station Size Breakdown</Label>
             <Tabs value={sizeTab} onValueChange={setSizeTab}>
               <TabsList className="w-full mb-3">

@@ -55,7 +55,7 @@ function ProblematicPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renderDot = (props: any) => {
     const r = Math.max(3, Math.min(14, 3 + (props.payload.z / 5)));
-    return <circle cx={props.cx} cy={props.cy} r={r} fill="oklch(0.48 0.14 250)" fillOpacity={0.7} stroke="oklch(0.48 0.14 250)" strokeWidth={1} />;
+    return <circle cx={props.cx} cy={props.cy} r={r} fill="oklch(0.50 0.16 260)" fillOpacity={0.6} stroke="oklch(0.50 0.16 260)" strokeWidth={1} />;
   };
 
   return (
@@ -65,16 +65,16 @@ function ProblematicPage() {
           <div>
             <Label>Date Range</Label>
             <div className="grid grid-cols-2 gap-2 mt-1.5">
-              <div><span className="text-[10px] text-muted-foreground">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
-              <div><span className="text-[10px] text-muted-foreground">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">From</span><Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="h-8 text-xs" /></div>
+              <div><span className="text-[10px] text-muted-foreground/60">To</span><Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="h-8 text-xs" /></div>
             </div>
           </div>
-          <div className="border-t border-border pt-3 mt-3 space-y-2">
+          <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
             <Label>Thresholds</Label>
-            <div><span className="text-[10px] text-muted-foreground">Late threshold (min)</span><Input type="number" value={lateThreshold} min={1} max={30} step={0.5} onChange={(e) => setLateThreshold(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Min days observed</span><Input type="number" value={minDays} min={1} max={30} onChange={(e) => setMinDays(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Min delay (min)</span><Input type="number" value={delayFloor} min={0} max={120} onChange={(e) => setDelayFloor(+e.target.value)} className="h-8 text-xs" /></div>
-            <div><span className="text-[10px] text-muted-foreground">Delay cap (min)</span><Input type="number" value={delayCap} min={1} max={120} onChange={(e) => setDelayCap(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Late threshold (min)</span><Input type="number" value={lateThreshold} min={1} max={30} step={0.5} onChange={(e) => setLateThreshold(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min days observed</span><Input type="number" value={minDays} min={1} max={30} onChange={(e) => setMinDays(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Min delay (min)</span><Input type="number" value={delayFloor} min={0} max={120} onChange={(e) => setDelayFloor(+e.target.value)} className="h-8 text-xs" /></div>
+            <div><span className="text-[10px] text-muted-foreground/60">Delay cap (min)</span><Input type="number" value={delayCap} min={1} max={120} onChange={(e) => setDelayCap(+e.target.value)} className="h-8 text-xs" /></div>
           </div>
           <ApplyButton loading={isFetching} onClick={loadData} label="Analyse" />
         </>
@@ -85,7 +85,7 @@ function ProblematicPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Train-Station Pairs" value={fmt(data.n_pairs)} />
             <MetricCard label="Repeat Offenders" value={fmt(data.n_offenders)} danger />
             <MetricCard label="Worst Train" value={data.offenders[0]?.train_no ?? "\u2014"} />
@@ -93,11 +93,11 @@ function ProblematicPage() {
           </div>
 
           {scatterData.length > 0 && (
-            <div className="rounded-xl border border-border bg-card p-4 shadow-sm mb-4">
-              <h3 className="text-sm font-semibold mb-3">Late Rate vs Average Delay</h3>
+            <div className="rounded-2xl border border-border/50 bg-card p-5 shadow-sm mb-4 animate-slide-up">
+              <h3 className="text-sm font-semibold mb-4 text-foreground">Late Rate vs Average Delay</h3>
               <ResponsiveContainer width="100%" height={360}>
                 <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
                   <XAxis dataKey="x" name="% Late" type="number" unit="%" tick={{ fontSize: 11 }} label={{ value: "% Late", position: "insideBottom", offset: -10, fontSize: 12 }} />
                   <YAxis dataKey="y" name="Avg Delay (min)" type="number" unit="m" tick={{ fontSize: 11 }} label={{ value: "Avg Delay (min)", angle: -90, position: "insideLeft", offset: 5, fontSize: 12 }} />
                   <Tooltip
@@ -106,14 +106,14 @@ function ProblematicPage() {
                       if (!active || !payload?.length) return null;
                       const d = payload[0].payload;
                       return (
-                        <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
+                        <div className="rounded-xl border border-border/50 bg-card px-3 py-2 text-xs shadow-lg">
                           <p className="font-semibold">{d.name}</p>
                           <p className="text-muted-foreground">Late: {d.x}% | Avg: {d.y}m | Days: {d.z}</p>
                         </div>
                       );
                     }}
                   />
-                  <Scatter data={scatterData} fill="oklch(0.48 0.14 250)" fillOpacity={0.7} shape={renderDot} />
+                  <Scatter data={scatterData} fill="oklch(0.50 0.16 260)" fillOpacity={0.6} shape={renderDot} />
                 </ScatterChart>
               </ResponsiveContainer>
             </div>
