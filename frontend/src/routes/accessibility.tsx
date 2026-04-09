@@ -28,6 +28,8 @@ export const accessibilityRoute = createRoute({
 
 const ALL_OPS = ["SNCB", "De Lijn", "STIB", "TEC"];
 
+type ViewMode = "gradient" | "stations";
+
 interface AccessibilityData {
   n_stops: number; median_time: number; mean_time: number; p95_time: number; pct_10min: number;
   image_b64?: string; error?: string;
@@ -44,6 +46,7 @@ function AccessibilityPage() {
   const [maxTime, setMaxTime] = useState(200);
   const [resolution, setResolution] = useState(200);
   const [targetDate, setTargetDate] = useState(daysAgo(1));
+  const [viewMode, setViewMode] = useState<ViewMode>("gradient");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
   const mapRef = useRef<DeckMapRef>(null);
 
@@ -64,16 +67,21 @@ function AccessibilityPage() {
     setList(list.includes(item) ? list.filter((o) => o !== item) : [...list, item]);
 
   const layers = useMemo<Layer[]>(() => {
-    if (!data || data.error || !data.image_b64) return [];
-    return [
-      new BitmapLayer({
-        id: "heatmap",
-        image: "data:image/png;base64," + data.image_b64,
-        bounds: [2.55, 49.5, 6.41, 51.51],
-        opacity: 0.75,
-      }),
-    ] as Layer[];
-  }, [data]);
+    if (!data || data.error) return [];
+
+    if (viewMode === "gradient" && data.image_b64) {
+      return [
+        new BitmapLayer({
+          id: "heatmap",
+          image: "data:image/png;base64," + data.image_b64,
+          bounds: [2.55, 49.5, 6.41, 51.51],
+          opacity: 0.75,
+        }),
+      ] as Layer[];
+    }
+
+    return [];
+  }, [data, viewMode]);
 
   return (
     <Layout
@@ -89,6 +97,16 @@ function AccessibilityPage() {
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="border-t border-border/40 pt-3 mt-3">
+            <Label>View</Label>
+            <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="mt-1.5">
+              <TabsList className="w-full">
+                <TabsTrigger value="gradient" className="flex-1">Gradient</TabsTrigger>
+                <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
+              </TabsList>
+            </Tabs>
           </div>
 
           <div className="border-t border-border/40 pt-3 mt-3">
@@ -156,7 +174,13 @@ function AccessibilityPage() {
             <MetricCard label="95th pct" value={data.p95_time} suffix="min" />
             <MetricCard label="<= 10 min" value={data.pct_10min} suffix="%" />
           </div>
-          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
+          {viewMode === "stations" ? (
+            <div className="flex items-center justify-center h-[calc(100vh-16rem)] border border-dashed border-border/60 rounded-lg">
+              <p className="text-sm text-muted-foreground">Stations view requires stop-level data from the API</p>
+            </div>
+          ) : (
+            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
+          )}
         </>
       )}
 

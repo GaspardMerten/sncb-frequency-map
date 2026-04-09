@@ -16,9 +16,10 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
-import { colorToRGBA, heatmapLayer } from "@/lib/layers";
+import { colorToRGBA, heatmapLayer, choroplethLayer } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
 import { fmt, today } from "@/lib/utils";
+import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
 
 export const multimodalRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -33,7 +34,7 @@ interface MultimodalData {
   error?: string;
 }
 
-type ViewMode = "stations" | "gradient";
+type ViewMode = "stations" | "gradient" | "provinces" | "regions";
 
 const ALL_OPS = ["SNCB", "De Lijn", "STIB", "TEC"];
 const OP_COLORS: Record<string, [number, number, number, number]> = {
@@ -65,6 +66,11 @@ function MultimodalPage() {
     enabled: !!queryParams,
   });
 
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
   const loadData = () => {
     if (!address) return;
     setQueryParams({
@@ -85,6 +91,51 @@ function MultimodalPage() {
     if (!data || data.error) return [];
 
     const maxDur = timeBudget * 60;
+
+    if (viewMode === "provinces" && geoData && data.stations?.length) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.duration,
+      );
+      const valueMap = new Map<string, number>();
+      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("province-choropleth", enriched, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
+
+    if (viewMode === "regions" && geoData && data.stations?.length) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.duration,
+      );
+      const regionAgg = new Map<string, { sum: number; count: number }>();
+      for (const [province, agg] of byProvince) {
+        const region = getRegion(province);
+        const existing = regionAgg.get(region);
+        if (existing) {
+          existing.sum += agg.sum;
+          existing.count += agg.count;
+        } else {
+          regionAgg.set(region, { sum: agg.sum, count: agg.count });
+        }
+      }
+      const valueMap = new Map<string, number>();
+      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("region-choropleth", regionGeo, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
 
     if (viewMode === "gradient") {
       const result: Layer[] = [];
@@ -169,7 +220,7 @@ function MultimodalPage() {
     }
 
     return result;
-  }, [data, viewMode, timeBudget, maxWalk, selectedOps]);
+  }, [data, geoData, viewMode, timeBudget, maxWalk, selectedOps]);
 
   return (
     <Layout
@@ -193,6 +244,8 @@ function MultimodalPage() {
               <TabsList className="w-full">
                 <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
                 <TabsTrigger value="gradient" className="flex-1">Gradient</TabsTrigger>
+                <TabsTrigger value="provinces" className="flex-1">Provinces</TabsTrigger>
+                <TabsTrigger value="regions" className="flex-1">Regions</TabsTrigger>
               </TabsList>
             </Tabs>
           </div>
