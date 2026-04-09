@@ -1,5 +1,5 @@
 import { createRoute } from "@tanstack/react-router";
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import type { Layer } from "@deck.gl/core";
@@ -14,6 +14,7 @@ import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,8 +32,12 @@ export const durationRoute = createRoute({
   component: DurationPage,
 });
 
+interface DurationStation {
+  name: string; lat: number; lon: number; duration: number;
+}
+
 interface DurationData {
-  stations: { name: string; lat: number; lon: number; duration: number }[];
+  stations: DurationStation[];
   dest_coords?: { name: string; lat: number; lon: number }[];
   avg_duration: number; min_duration: number; max_duration: number; error?: string;
 }
@@ -61,6 +66,7 @@ function DurationPage() {
   const [transportMode, setTransportMode] = useState<TransportMode>("walk");
   const [viewMode, setViewMode] = useState<ViewMode>("stations");
   const [destSearch, setDestSearch] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedDests, setSelectedDests] = useState<string[]>(["Bruxelles-Central"]);
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
   const mapRef = useRef<DeckMapRef>(null);
@@ -85,11 +91,25 @@ function DurationPage() {
     });
   };
 
-  const addDest = () => {
-    const v = destSearch.trim();
-    if (v && !selectedDests.includes(v)) setSelectedDests([...selectedDests, v]);
+  const suggestions = useMemo(() => {
+    if (!destSearch || destSearch.length < 2 || !data) return [];
+    return data.stations
+      .filter((s) => s.name.toLowerCase().includes(destSearch.toLowerCase()))
+      .filter((s) => !selectedDests.includes(s.name))
+      .slice(0, 8);
+  }, [destSearch, data, selectedDests]);
+
+  const addDest = useCallback((name: string) => {
+    const v = name.trim();
+    if (v && !selectedDests.includes(v)) setSelectedDests((prev) => [...prev, v]);
     setDestSearch("");
-  };
+    setShowSuggestions(false);
+  }, [selectedDests]);
+
+  const sortedStations = useMemo(() => {
+    if (!data?.stations) return [];
+    return [...data.stations].sort((a, b) => a.duration - b.duration);
+  }, [data]);
 
   const mileLabel = direction === "to" ? "First-mile transport" : "Last-mile transport";
 
@@ -270,9 +290,48 @@ function DurationPage() {
     >
       <div className="mb-5">
         <span className="text-[10px] text-muted-foreground/60 uppercase tracking-widest font-medium block mb-1.5">Destination station(s)</span>
-        <div className="flex gap-2">
-          <Input value={destSearch} onChange={(e) => setDestSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addDest()} placeholder="Search station..." className="max-w-sm text-sm" />
-          <Button size="sm" variant="secondary" onClick={addDest}>Add</Button>
+        <div className="relative">
+          <div className="flex gap-2">
+            <Input
+              value={destSearch}
+              onChange={(e) => { setDestSearch(e.target.value); setShowSuggestions(true); }}
+              onFocus={() => setShowSuggestions(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (suggestions.length > 0) {
+                    addDest(suggestions[0].name);
+                  } else {
+                    addDest(destSearch);
+                  }
+                }
+                if (e.key === "Escape") setShowSuggestions(false);
+              }}
+              placeholder="Search station..."
+              className="max-w-sm text-sm"
+            />
+            <Button size="sm" variant="secondary" onClick={() => {
+              if (suggestions.length > 0) {
+                addDest(suggestions[0].name);
+              } else {
+                addDest(destSearch);
+              }
+            }}>Add</Button>
+          </div>
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="absolute z-50 top-full mt-1 w-full max-w-sm rounded-lg border border-border/50 bg-card shadow-lg overflow-hidden">
+              {suggestions.map((s) => (
+                <button
+                  key={s.name}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-accent/50 transition-colors cursor-pointer flex items-center justify-between"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => addDest(s.name)}
+                >
+                  <span>{s.name}</span>
+                  <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(s.duration)} min</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-1.5 mt-2">
           {selectedDests.map((d) => (
@@ -300,6 +359,38 @@ function DurationPage() {
             <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
             <ColorLegend min="Short travel time" max="Long travel time" />
           </div>
+
+          {sortedStations.length > 0 && (
+            <div className="mt-4">
+              <DataTable
+                title="All Stations - Travel Duration"
+                keyFn={(_, i) => i}
+                data={sortedStations}
+                maxRows={200}
+                columns={[
+                  {
+                    header: "Station",
+                    accessor: (s) => <span className="font-medium">{s.name}</span>,
+                  },
+                  {
+                    header: "Duration (min)",
+                    accessor: (s) => (
+                      <div className="flex items-center justify-end gap-2">
+                        <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-primary/60 transition-all"
+                            style={{ width: `${Math.min((s.duration / (timeBudget * 60)) * 100, 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-muted-foreground tabular-nums w-12 text-right">{Math.round(s.duration)}</span>
+                      </div>
+                    ),
+                    align: "right" as const,
+                  },
+                ]}
+              />
+            </div>
+          )}
 
           <div className="mt-4">
             <MethodologyPanel>

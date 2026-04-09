@@ -14,6 +14,7 @@ import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { DataTable } from "@/components/DataTable";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -121,6 +122,21 @@ function ConnectivityPage() {
     const avgC = sizeFilteredStations.reduce((sum, s) => sum + s.reach_km, 0) / count;
     return { count, avgA, avgB, avgC };
   }, [sizeFilteredStations]);
+
+  const sizeComparisonData = useMemo(() => {
+    if (!data) return [];
+    const sizes = ["small", "medium", "big"] as const;
+    const labels: Record<string, string> = { small: "Small", medium: "Medium", big: "Big" };
+    return sizes.map((size) => {
+      const stations = data.stations.filter((s) => s.size === size);
+      const count = stations.length;
+      if (count === 0) return { label: labels[size], count: 0, avgA: 0, avgB: 0, avgC: 0 };
+      const avgA = stations.reduce((sum, s) => sum + s.reachable, 0) / count;
+      const avgB = stations.reduce((sum, s) => sum + s.direct_freq, 0) / count;
+      const avgC = stations.reduce((sum, s) => sum + s.reach_km, 0) / count;
+      return { label: labels[size], count, avgA, avgB, avgC };
+    });
+  }, [data]);
 
   // Get max values for ZAxis domain
   const zDomains = useMemo(() => {
@@ -279,6 +295,23 @@ function ConnectivityPage() {
               <MetricCard label="Avg Reach (C)" value={sizeAvg.avgC.toFixed(0)} suffix=" km" />
             </div>
           </div>
+
+          {sizeComparisonData.length > 0 && (
+            <div className="mb-4 animate-slide-up">
+              <DataTable
+                title="Size Comparison Summary"
+                keyFn={(row) => row.label}
+                data={sizeComparisonData}
+                columns={[
+                  { header: "Size", accessor: (row) => <span className="font-medium">{row.label}</span> },
+                  { header: "Count", accessor: (row) => fmt(row.count), align: "right" },
+                  { header: "Avg Reachable", accessor: (row) => row.avgA.toFixed(1), align: "right" },
+                  { header: "Avg Freq/h", accessor: (row) => row.avgB.toFixed(2), align: "right" },
+                  { header: "Avg Reach km", accessor: (row) => <span className="font-semibold text-primary">{row.avgC.toFixed(0)}</span>, align: "right" },
+                ]}
+              />
+            </div>
+          )}
 
           <MethodologyPanel>
             <p><b>Metric A (Reachable Destinations):</b> BFS-based reachability count within the time budget, considering transfers.</p>

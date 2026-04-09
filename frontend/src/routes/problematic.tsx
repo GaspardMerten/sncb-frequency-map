@@ -1,7 +1,7 @@
 import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, X } from "lucide-react";
 import {
   ScatterChart, Scatter, XAxis, YAxis, ZAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
   BarChart, Bar, ReferenceLine,
@@ -50,6 +50,7 @@ function ProblematicPage() {
   const [delayFloor, setDelayFloor] = useState(0);
   const [delayCap, setDelayCap] = useState(30);
   const [selectedPair, setSelectedPair] = useState("");
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
 
   const { data, error, isFetching } = useQuery({
@@ -105,6 +106,18 @@ function ProblematicPage() {
       label: `${o.train_no} @ ${o.station} (${o.pct_late}%)`,
     }));
   }, [data]);
+
+  // Selected offender from table row click
+  const selectedOffender = useMemo(() => {
+    if (selectedIdx === null || !data?.offenders) return null;
+    return data.offenders[selectedIdx] ?? null;
+  }, [selectedIdx, data]);
+
+  const handleRowClick = (row: Offender) => {
+    if (!data?.offenders) return;
+    const idx = data.offenders.indexOf(row);
+    setSelectedIdx(idx >= 0 ? idx : null);
+  };
 
   return (
     <Layout
@@ -172,6 +185,49 @@ function ProblematicPage() {
             </div>
           )}
 
+          {/* Detail card for selected offender from table click */}
+          {selectedOffender && (
+            <div className="rounded-2xl border border-primary/20 bg-primary/5 p-5 shadow-sm mb-4 animate-slide-up">
+              <div className="flex items-start justify-between mb-3">
+                <h3 className="text-sm font-semibold text-foreground">Selected Offender Detail</h3>
+                <button
+                  onClick={() => setSelectedIdx(null)}
+                  className="inline-flex items-center justify-center h-7 w-7 rounded-lg border border-border/50 bg-background/80 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">Train</span>
+                  <span className="text-sm font-mono font-semibold text-foreground">{selectedOffender.train_no}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">Station</span>
+                  <span className="text-sm font-medium text-foreground">{selectedOffender.station}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">Days Seen</span>
+                  <span className="text-sm font-semibold tabular-nums text-foreground">{selectedOffender.days_seen}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">% Late</span>
+                  <span className={cn("text-sm font-semibold tabular-nums", selectedOffender.pct_late > 75 ? "text-destructive" : selectedOffender.pct_late > 50 ? "text-orange-500" : "text-foreground")}>
+                    {selectedOffender.pct_late}%
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">Avg Delay</span>
+                  <span className="text-sm font-semibold tabular-nums text-foreground">{selectedOffender.avg_delay}m</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-muted-foreground/60 block">Max Delay</span>
+                  <span className="text-sm font-semibold tabular-nums text-foreground">{selectedOffender.max_delay}m</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Day-by-day detail view */}
           <div className="rounded-2xl border border-border/50 bg-card p-5 shadow-sm mb-4 animate-slide-up">
             <h3 className="text-sm font-semibold mb-3 text-foreground">Day-by-Day Detail</h3>
@@ -209,6 +265,7 @@ function ProblematicPage() {
             keyFn={(_, i) => i}
             data={data.offenders}
             maxRows={100}
+            onRowClick={handleRowClick}
             columns={[
               { header: "Train", accessor: (o) => <span className="font-mono font-medium">{o.train_no}</span> },
               { header: "Station", accessor: (o) => <span className="truncate max-w-[140px] block text-muted-foreground">{o.station}</span> },

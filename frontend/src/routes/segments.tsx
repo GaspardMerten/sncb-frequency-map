@@ -29,7 +29,7 @@ export const segmentsRoute = createRoute({
 });
 
 interface SegmentData {
-  segments: { freq: number; coords: [number, number][] }[];
+  segments: { id: string; freq: number; coords: [number, number][] }[];
   stations: { id: string; name: string; freq: number; lat: number; lon: number }[];
   day_count: number;
   error?: string;
@@ -56,6 +56,12 @@ function SegmentsPage() {
   });
 
   const loadData = () => setQueryParams(filterParams(filters));
+
+  // Top 50 segments sorted by frequency descending
+  const topSegments = useMemo(() => {
+    if (!data) return [];
+    return [...data.segments].sort((a, b) => b.freq - a.freq).slice(0, 50);
+  }, [data]);
 
   // Province data for bar charts
   const provinceData = useMemo(() => {
@@ -233,6 +239,22 @@ function SegmentsPage() {
                   <Bar dataKey="avg" fill="oklch(0.55 0.15 250)" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
+            </div>
+          )}
+
+          {viewMode === "segments" && topSegments.length > 0 && (
+            <div className="mt-4 animate-slide-up">
+              <DataTable
+                title="Top Segments by Frequency"
+                keyFn={(s) => s.id}
+                data={topSegments}
+                columns={[
+                  { header: "#", accessor: (_, i) => i + 1, className: "text-muted-foreground w-10" },
+                  { header: "From", accessor: (s) => <span className="font-medium">{s.id.split("_")[0]}</span> },
+                  { header: "To", accessor: (s) => <span className="font-medium">{s.id.split("_")[1]}</span> },
+                  { header: "Trains/day", accessor: (s) => <span className="font-semibold text-primary">{fmt(s.freq, 1)}</span>, align: "right" },
+                ]}
+              />
             </div>
           )}
 

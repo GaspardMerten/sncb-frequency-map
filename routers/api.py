@@ -619,7 +619,11 @@ async def api_accessibility(
         median_time = round(float(np.median(valid_times)), 1)
         mean_time = round(float(np.mean(valid_times)), 1)
         p95_time = round(float(np.percentile(valid_times, 95)), 1)
+        pct_5min = round(float(np.mean(valid_times <= 5) * 100), 1)
         pct_10min = round(float(np.mean(valid_times <= 10) * 100), 1)
+        pct_15min = round(float(np.mean(valid_times <= 15) * 100), 1)
+        pct_20min = round(float(np.mean(valid_times <= 20) * 100), 1)
+        pct_30min = round(float(np.mean(valid_times <= 30) * 100), 1)
 
         # Render image
         effective_max = min(float(np.nanmax(grid_time[mask])) if np.any(mask & ~np.isnan(grid_time)) else max_time, max_time)
@@ -677,7 +681,11 @@ async def api_accessibility(
             "median_time": median_time,
             "mean_time": mean_time,
             "p95_time": p95_time,
+            "pct_5min": pct_5min,
             "pct_10min": pct_10min,
+            "pct_15min": pct_15min,
+            "pct_20min": pct_20min,
+            "pct_30min": pct_30min,
             "image_b64": image_b64,
             "stops": stops_list,
         }

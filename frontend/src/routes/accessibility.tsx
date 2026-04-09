@@ -11,8 +11,7 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
-import { ColorLegend } from "@/components/ColorLegend";
-import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { DataTable } from "@/components/DataTable";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -42,7 +41,8 @@ type ViewMode = "gradient" | "stations";
 interface StopEntry { name: string; lat: number; lon: number; operator: string; }
 
 interface AccessibilityData {
-  n_stops: number; median_time: number; mean_time: number; p95_time: number; pct_10min: number;
+  n_stops: number; median_time: number; mean_time: number; p95_time: number;
+  pct_5min?: number; pct_10min: number; pct_15min?: number; pct_20min?: number; pct_30min?: number;
   image_b64?: string; stops?: StopEntry[]; error?: string;
 }
 
@@ -77,7 +77,6 @@ function AccessibilityPage() {
   const toggleList = (list: string[], setList: (v: string[]) => void, item: string) =>
     setList(list.includes(item) ? list.filter((o) => o !== item) : [...list, item]);
 
-  // Group stops by operator for count display
   const stopsByOp = useMemo(() => {
     if (!data?.stops) return new Map<string, number>();
     const map = new Map<string, number>();
@@ -86,6 +85,10 @@ function AccessibilityPage() {
     }
     return map;
   }, [data]);
+
+  const opTableData = useMemo(() => {
+    return Array.from(stopsByOp.entries()).map(([op, count]) => ({ operator: op, count })).sort((a, b) => b.count - a.count);
+  }, [stopsByOp]);
 
   const layers = useMemo<Layer[]>(() => {
     if (!data || data.error) return [];
@@ -101,7 +104,6 @@ function AccessibilityPage() {
       ] as Layer[];
     }
 
-    // Stations view
     if (viewMode === "stations" && data.stops?.length) {
       return [
         stationLayer("accessibility-stops", data.stops, {
@@ -205,18 +207,28 @@ function AccessibilityPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5 animate-slide-up">
+          {/* Summary stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 animate-slide-up">
             <MetricCard label="Stops" value={fmt(data.n_stops)} />
-            <MetricCard label="Median" value={data.median_time} suffix="min" />
-            <MetricCard label="Mean" value={data.mean_time} suffix="min" />
-            <MetricCard label="95th pct" value={data.p95_time} suffix="min" />
-            <MetricCard label="<= 10 min" value={data.pct_10min} suffix="%" />
+            <MetricCard label="Median" value={data.median_time} suffix=" min" />
+            <MetricCard label="Mean" value={data.mean_time} suffix=" min" />
+            <MetricCard label="95th pct" value={data.p95_time} suffix=" min" />
           </div>
 
-          <div className="space-y-2">
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
-            {viewMode === "gradient" && <ColorLegend min="Close (fast)" max="Far (slow)" />}
-            {viewMode === "stations" && (
+          {/* Coverage thresholds */}
+          <div className="grid grid-cols-3 md:grid-cols-5 gap-3 mb-5 animate-slide-up">
+            {data.pct_5min != null && <MetricCard label="<= 5 min" value={data.pct_5min} suffix="%" />}
+            <MetricCard label="<= 10 min" value={data.pct_10min} suffix="%" />
+            {data.pct_15min != null && <MetricCard label="<= 15 min" value={data.pct_15min} suffix="%" />}
+            {data.pct_20min != null && <MetricCard label="<= 20 min" value={data.pct_20min} suffix="%" />}
+            {data.pct_30min != null && <MetricCard label="<= 30 min" value={data.pct_30min} suffix="%" />}
+          </div>
+
+          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+
+          {/* Operator legend + stops table for stations view */}
+          {viewMode === "stations" && (
+            <div className="mt-4 space-y-3">
               <div className="flex gap-4 text-[10px] text-muted-foreground">
                 {ALL_OPS.map((op) => {
                   const count = stopsByOp.get(op) || 0;
@@ -229,15 +241,24 @@ function AccessibilityPage() {
                   );
                 })}
               </div>
-            )}
-          </div>
-
-          <div className="mt-4">
-            <MethodologyPanel>
-              <p>For each point on a grid covering Belgium, the time to the nearest transit stop is computed using Manhattan distance and the selected transport speed (Walk 5km/h, Bike 15km/h, Car 50km/h).</p>
-              <p>When feeder transit is enabled, a BFS expands from destination stops through the feeder network, effectively increasing the reach of the destination operator. The gradient view renders green (close) to red (far). The stations view shows all stops colored by operator.</p>
-            </MethodologyPanel>
-          </div>
+              {opTableData.length > 0 && (
+                <DataTable
+                  title="Stops per Operator"
+                  keyFn={(d) => d.operator}
+                  data={opTableData}
+                  columns={[
+                    { header: "Operator", accessor: (d) => (
+                      <span className="flex items-center gap-2 font-medium">
+                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: `rgba(${OP_COLORS[d.operator]?.slice(0, 3).join(",")},1)` }} />
+                        {d.operator}
+                      </span>
+                    )},
+                    { header: "Stops", accessor: (d) => <span className="font-semibold text-primary">{fmt(d.count)}</span>, align: "right" },
+                  ]}
+                />
+              )}
+            </div>
+          )}
         </>
       )}
 
