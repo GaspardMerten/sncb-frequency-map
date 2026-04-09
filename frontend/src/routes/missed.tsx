@@ -12,6 +12,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,6 +60,26 @@ function MissedPage() {
       missed: s.missed,
       pct: s.pct_missed,
     }));
+  }, [data]);
+
+  // Histogram of miss rates
+  const histogramData = useMemo(() => {
+    if (!data?.stations || data.stations.length < 2) return [];
+    const bins = 15;
+    const maxRate = Math.max(...data.stations.map((s) => s.pct_missed), 1);
+    const binWidth = Math.ceil(maxRate / bins) || 1;
+    const counts: { range: string; count: number; from: number }[] = [];
+    for (let i = 0; i < bins; i++) {
+      const from = i * binWidth;
+      const to = (i + 1) * binWidth;
+      if (from > maxRate) break;
+      counts.push({
+        range: `${from}-${Math.min(to, Math.ceil(maxRate))}%`,
+        count: data.stations.filter((s) => s.pct_missed >= from && s.pct_missed < to).length,
+        from,
+      });
+    }
+    return counts.filter((b) => b.count > 0);
   }, [data]);
 
   const layers = useMemo<Layer[]>(() => {
@@ -115,7 +137,10 @@ function MissedPage() {
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             <div className="xl:col-span-2 space-y-4">
-              <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-22rem)]" />
+              <div className="space-y-2">
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-22rem)]" />
+                <ColorLegend min="Few missed" max="Many missed" />
+              </div>
               {top10Stations.length > 0 && (
                 <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
                   <h3 className="text-sm font-semibold text-foreground mb-4">Top 10 Worst Stations</h3>
@@ -128,6 +153,22 @@ function MissedPage() {
                         formatter={(value: number) => [`${value} missed`, "Count"]}
                       />
                       <Bar dataKey="missed" fill="oklch(0.58 0.22 25)" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+              {histogramData.length > 0 && (
+                <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
+                  <h3 className="text-sm font-semibold text-foreground mb-4">Miss Rate Distribution</h3>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <BarChart data={histogramData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                      <XAxis dataKey="range" tick={{ fontSize: 9 }} angle={-30} textAnchor="end" height={45} />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} label={{ value: "Stations", angle: -90, position: "insideLeft", offset: 5, fontSize: 10 }} />
+                      <Tooltip
+                        contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
+                        formatter={(value: number) => [`${value} stations`, "Count"]}
+                      />
+                      <Bar dataKey="count" fill="oklch(0.55 0.15 290)" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -146,6 +187,13 @@ function MissedPage() {
                 { header: "%", accessor: (s) => <span className={cn(s.pct_missed > 15 ? "text-destructive font-semibold" : "text-muted-foreground")}>{s.pct_missed}%</span>, align: "right" },
               ]}
             />
+          </div>
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>For each station and day, all arriving and departing SNCB trains are paired. A valid connection exists when two different trains have a gap between the planned arrival and planned departure within the transfer window.</p>
+              <p>A connection is "missed" when the actual arrival time exceeds the actual departure time. The histogram shows how miss rates are distributed across stations — a right-skewed distribution indicates a few problem stations.</p>
+            </MethodologyPanel>
           </div>
         </>
       )}

@@ -244,6 +244,33 @@ async def api_punctuality(
         avg_delay_overall = 0
         pct_late_overall = 0
 
+    # Hourly aggregation
+    hourly_data: dict[int, list[float]] = defaultdict(list)
+    for rec in records:
+        name = _station_name(rec)
+        if not name:
+            continue
+        hour = _parse_hour(rec.get(time_col, ""))
+        if hour < hour_start or hour >= hour_end:
+            continue
+        try:
+            delay_sec = float(rec.get(delay_col, 0) or 0)
+        except (ValueError, TypeError):
+            continue
+        delay_min = delay_sec / 60.0
+        if delay_min < delay_floor:
+            delay_min = 0.0
+        delay_min = min(delay_min, delay_cap)
+        hourly_data[hour].append(delay_min)
+
+    hourly = []
+    for h in range(hour_start, hour_end):
+        delays_h = hourly_data.get(h, [])
+        if delays_h:
+            hourly.append({"hour": h, "avg_delay": round(sum(delays_h) / len(delays_h), 1), "n_trains": len(delays_h)})
+        else:
+            hourly.append({"hour": h, "avg_delay": 0, "n_trains": 0})
+
     return JSONResponse(content={
         "summary": {
             "n_stations": len(stations),
@@ -252,6 +279,7 @@ async def api_punctuality(
             "pct_late": str(pct_late_overall),
         },
         "stations": stations,
+        "hourly": hourly,
     })
 
 
@@ -632,6 +660,18 @@ async def api_accessibility(
         buf.seek(0)
         image_b64 = base64.b64encode(buf.read()).decode()
 
+        # Build stop list for stations view
+        stops_list = []
+        for sid in dest_stop_ids:
+            info = mm_stop_lookup.get(sid)
+            if info:
+                stops_list.append({
+                    "name": info.get("name", ""),
+                    "lat": info["lat"],
+                    "lon": info["lon"],
+                    "operator": info.get("operator", ""),
+                })
+
         return {
             "n_stops": n_stops,
             "median_time": median_time,
@@ -639,6 +679,7 @@ async def api_accessibility(
             "p95_time": p95_time,
             "pct_10min": pct_10min,
             "image_b64": image_b64,
+            "stops": stops_list,
         }
 
     result = await asyncio.to_thread(_compute)
@@ -667,6 +708,9 @@ async def api_propagation(
         # Accumulators
         sta_total: dict[str, float] = defaultdict(float)
         sta_count: dict[str, int] = defaultdict(int)
+        # Segment accumulators for segment view
+        seg_total: dict[tuple, float] = defaultdict(float)
+        seg_count: dict[tuple, int] = defaultdict(int)
 
         for d in _date_range(start_date, end_date):
             try:
@@ -717,9 +761,13 @@ async def api_propagation(
             idx = np.where(hits)[0]
 
             for i in idx:
+                from_station = stations[i]
                 to_station = stations[i + 1]
                 sta_total[to_station] += float(increases[i])
                 sta_count[to_station] += 1
+                seg_key = (from_station, to_station)
+                seg_total[seg_key] += float(increases[i])
+                seg_count[seg_key] += 1
 
         # Filter by min_incidents
         station_coords = {}
@@ -754,11 +802,33 @@ async def api_propagation(
 
         result_stations.sort(key=lambda s: -s["total_delay"])
 
+        # Build segment list
+        result_segments = []
+        for (from_name, to_name) in seg_total:
+            if seg_count[(from_name, to_name)] < min_incidents:
+                continue
+            total_d = round(seg_total[(from_name, to_name)] / 60, 1)
+            from_coords = station_coords.get(from_name)
+            to_coords = station_coords.get(to_name)
+            if from_coords and to_coords:
+                result_segments.append({
+                    "from_name": from_name,
+                    "to_name": to_name,
+                    "incidents": seg_count[(from_name, to_name)],
+                    "total_delay": total_d,
+                    "from_lat": from_coords["lat"],
+                    "from_lon": from_coords["lon"],
+                    "to_lat": to_coords["lat"],
+                    "to_lon": to_coords["lon"],
+                })
+        result_segments.sort(key=lambda s: -s["total_delay"])
+
         return {
             "n_events": total_events,
             "n_stations": len(result_stations),
             "total_delay_min": round(total_delay_sec / 60, 1),
             "stations": result_stations,
+            "segments": result_segments,
         }
 
     result = await asyncio.to_thread(_compute)
@@ -815,6 +885,9 @@ async def api_problematic(
             train_nos = np.asarray(df["train_no"].values, dtype=object)
             datdep = str(d)
 
+            relations = np.asarray(df.get("relation", pd.Series(["?"] * len(df))).fillna("?").values, dtype=object)
+            operators = np.asarray(df.get("train_serv", pd.Series(["?"] * len(df))).fillna("?").values, dtype=object)
+
             for j in range(len(df)):
                 key = (train_nos[j], stations[j])
                 day_agg = pair_days[key][datdep]
@@ -824,6 +897,9 @@ async def api_problematic(
                 day_agg["n"] += 1
                 if delays[j] > late_threshold_sec:
                     day_agg["n_late"] += 1
+                if "relation" not in day_agg or day_agg["relation"] == "?":
+                    day_agg["relation"] = str(relations[j])
+                    day_agg["operator"] = str(operators[j])
 
         # Aggregate
         offenders = []
@@ -849,6 +925,19 @@ async def api_problematic(
             avg_pct_late = round(total_pct_sum / nd, 1)
             avg_delay = round(total_sum / nd / 60, 1)
             avg_max_delay = round(total_max_sum / nd / 60, 1)
+            total_stops = sum(agg["n"] for agg in days_dict.values())
+
+            # Get relation/operator from first day
+            first_day = next(iter(days_dict.values()))
+            relation = first_day.get("relation", "?")
+            operator = first_day.get("operator", "?")
+
+            # Build daily breakdown
+            daily = []
+            for datdep_key in sorted(days_dict.keys()):
+                agg = days_dict[datdep_key]
+                day_avg = round(agg["sum"] / max(agg["n"], 1) / 60, 1)
+                daily.append({"date": datdep_key, "avg_delay": day_avg, "n": agg["n"]})
 
             offenders.append({
                 "train_no": str(train_no),
@@ -857,6 +946,10 @@ async def api_problematic(
                 "pct_late": avg_pct_late,
                 "avg_delay": str(avg_delay),
                 "max_delay": str(avg_max_delay),
+                "total_stops": total_stops,
+                "relation": relation,
+                "operator": operator,
+                "daily": daily,
             })
 
         offenders.sort(key=lambda o: -o["pct_late"])

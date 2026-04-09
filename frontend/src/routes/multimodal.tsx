@@ -11,6 +11,8 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -170,7 +172,7 @@ function MultimodalPage() {
       return result;
     }
 
-    // Stations view
+    // Stations view — size by duration (inverted: closer = bigger)
     const result: Layer[] = [];
 
     if (data.stations?.length) {
@@ -179,12 +181,12 @@ function MultimodalPage() {
           id: "multimodal-stations",
           data: data.stations,
           getPosition: (d) => [d.lon, d.lat],
-          getRadius: 4,
+          getRadius: (d) => 3 + (1 - d.duration / maxDur) * 10,
           getFillColor: (d) => OP_COLORS[d.operator] || [51, 51, 51, 200],
-          radiusMinPixels: 4,
-          radiusMaxPixels: 8,
+          radiusMinPixels: 3,
+          radiusMaxPixels: 16,
           pickable: true,
-          updateTriggers: { getFillColor: [selectedOps] },
+          updateTriggers: { getFillColor: [selectedOps], getRadius: [timeBudget] },
         }),
       );
     }
@@ -231,7 +233,10 @@ function MultimodalPage() {
             <div className="space-y-1.5 mt-1.5">
               {ALL_OPS.map((op) => (
                 <div key={op} className="flex items-center justify-between text-xs text-foreground/60">
-                  <span>{op}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: `rgba(${OP_COLORS[op]?.slice(0, 3).join(",")},1)` }} />
+                    {op}
+                  </span>
                   <Switch checked={selectedOps.includes(op)} onCheckedChange={() => toggleOp(op)} />
                 </div>
               ))}
@@ -301,7 +306,28 @@ function MultimodalPage() {
             <MetricCard label="Operators Used" value={data.operators_used} />
             <MetricCard label="Address" value={data.geocoded_address} />
           </div>
-          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+          <div className="space-y-2">
+            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+            {viewMode === "stations" && (
+              <div className="flex gap-4 text-[10px] text-muted-foreground">
+                {ALL_OPS.map((op) => (
+                  <span key={op} className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: `rgba(${OP_COLORS[op]?.slice(0, 3).join(",")},1)` }} />
+                    {op}
+                  </span>
+                ))}
+                <span className="ml-auto">Size = travel duration (bigger = closer)</span>
+              </div>
+            )}
+            {viewMode !== "stations" && <ColorLegend min="Short duration" max="Long duration" />}
+          </div>
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>Multimodal routing uses BFS on a unified timetable graph built from all selected operators (SNCB, De Lijn, STIB, TEC). Transfer connections are built between stops within walking distance (configurable).</p>
+              <p>From an address, the algorithm finds nearby transit stops and explores outbound connections. Walking time from address to first stop is included. Point size represents travel duration (larger = shorter travel time).</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 

@@ -3,6 +3,7 @@ import { useState, useMemo, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { MapPin } from "lucide-react";
 import type { Layer } from "@deck.gl/core";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { FilterPanel, type Filters } from "@/components/FilterPanel";
@@ -12,6 +13,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -19,7 +22,7 @@ import { Select, SelectOption } from "@/components/ui/select";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
-import { stationLayer, choroplethLayer, colorToRGBA } from "@/lib/layers";
+import { stationLayer, segmentLayer, choroplethLayer, colorToRGBA } from "@/lib/layers";
 import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
 
 export const reachRoute = createRoute({
@@ -30,7 +33,7 @@ export const reachRoute = createRoute({
 
 interface ReachStation {
   id: string; name: string; lat: number; lon: number; reachable: number;
-  destinations?: { name: string; lat: number; lon: number; time: number }[];
+  destinations?: { name: string; lat: number; lon: number; time: number; path?: [number, number][] }[];
 }
 interface ReachData {
   stations: ReachStation[]; max_reachable: number; avg_reachable: number; median_reachable: number; error?: string;
@@ -76,6 +79,18 @@ function ReachPage() {
       }
     }
   }, [data]);
+
+  // Province aggregation for bar charts
+  const provinceData = useMemo(() => {
+    if (!data || !geoData) return [];
+    const byProvince = aggregateByProvince(
+      data.stations, geoData,
+      (d) => d.lon, (d) => d.lat, (d) => d.reachable,
+    );
+    return Array.from(byProvince.entries())
+      .map(([name, agg]) => ({ name: name.length > 12 ? name.slice(0, 12) + "..." : name, fullName: name, avg: Math.round(agg.avg * 10) / 10, count: agg.count }))
+      .sort((a, b) => b.avg - a.avg);
+  }, [data, geoData]);
 
   const layers = useMemo<Layer[]>(() => {
     if (!data || data.error) return [];
@@ -137,7 +152,7 @@ function ReachPage() {
       stationLayer("reach-stations", stations, {
         positionFn: (d) => [d.lon, d.lat],
         radiusFn: (d) => 4 + (d.reachable / Math.max(maxReach, 1)) * 12,
-        colorFn: (d) => colorToRGBA(1 - d.reachable / Math.max(maxReach, 1)),
+        colorFn: (d) => colorToRGBA(d.reachable / Math.max(maxReach, 1)),
         radiusMinPixels: 3,
         radiusMaxPixels: 30,
         pickable: true,
@@ -159,6 +174,34 @@ function ReachPage() {
         );
 
         if (s.destinations && s.destinations.length) {
+          // Draw route paths if available
+          const destsWithPath = s.destinations.filter((d) => d.path && d.path.length >= 2);
+          if (destsWithPath.length) {
+            result.push(
+              segmentLayer("reach-routes", destsWithPath, {
+                pathFn: (d) => d.path!.map(([lat, lon]) => [lon, lat] as [number, number]),
+                widthFn: () => 2,
+                colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60), 160),
+                widthMinPixels: 1,
+                widthMaxPixels: 6,
+              }) as Layer,
+            );
+          }
+
+          // Draw straight lines for destinations without path data
+          const destsWithoutPath = s.destinations.filter((d) => !d.path || d.path.length < 2);
+          if (destsWithoutPath.length) {
+            result.push(
+              segmentLayer("reach-routes-fallback", destsWithoutPath, {
+                pathFn: (d) => [[s.lon, s.lat], [d.lon, d.lat]],
+                widthFn: () => 1,
+                colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60), 100),
+                widthMinPixels: 1,
+                widthMaxPixels: 3,
+              }) as Layer,
+            );
+          }
+
           result.push(
             stationLayer("reach-destinations", s.destinations, {
               positionFn: (d) => [d.lon, d.lat],
@@ -234,8 +277,9 @@ function ReachPage() {
 
           {viewMode === "stations" && (
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-              <div className="xl:col-span-2">
-                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+              <div className="xl:col-span-2 space-y-2">
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
+                <ColorLegend min="Few reachable" max="Many reachable" />
               </div>
               <div>
                 <div className="mb-3">
@@ -260,8 +304,36 @@ function ReachPage() {
           )}
 
           {(viewMode === "provinces" || viewMode === "regions") && (
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-18rem)]" />
+                <ColorLegend min="Low avg reachable" max="High avg reachable" />
+              </div>
+              {viewMode === "provinces" && provinceData.length > 0 && (
+                <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
+                  <h3 className="text-sm font-semibold text-foreground mb-4">Avg Reachable Stations by Province</h3>
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={provinceData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                      <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" height={50} />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                      <Tooltip
+                        contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
+                        formatter={(value: number) => [`${value}`, "Avg reachable"]}
+                      />
+                      <Bar dataKey="avg" fill="oklch(0.55 0.15 250)" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
           )}
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>Reachability is computed using a Breadth-First Search (BFS) on the GTFS timetable graph. For each station, the algorithm explores all trains departing within the departure window and follows connections (with configurable transfer penalties) until the time budget is exhausted.</p>
+              <p>The reachable count represents how many unique stations can be reached from each origin within the given time budget and transfer constraints. When a station is selected, route paths are drawn using infrastructure geometry where available, with straight-line fallbacks.</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 

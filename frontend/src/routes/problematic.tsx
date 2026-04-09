@@ -2,7 +2,10 @@ import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
-import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import {
+  ScatterChart, Scatter, XAxis, YAxis, ZAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+  BarChart, Bar, ReferenceLine,
+} from "recharts";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { MetricCard } from "@/components/MetricCard";
@@ -11,8 +14,10 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectOption } from "@/components/ui/select";
 import { fetchApi } from "@/lib/api";
 import { fmt, daysAgo, cn } from "@/lib/utils";
 
@@ -22,8 +27,20 @@ export const problematicRoute = createRoute({
   component: ProblematicPage,
 });
 
-interface Offender { train_no: string; station: string; days_seen: number; pct_late: number; avg_delay: string; max_delay: string; }
+interface DailyEntry { date: string; avg_delay: number; n: number; }
+interface Offender {
+  train_no: string; station: string; days_seen: number; pct_late: number;
+  avg_delay: string; max_delay: string; total_stops?: number;
+  relation?: string; operator?: string; daily?: DailyEntry[];
+}
 interface ProblematicData { n_pairs: number; n_offenders: number; offenders: Offender[]; error?: string; }
+
+// Distinct colors for relations
+const RELATION_COLORS = [
+  "#e31a1c", "#ff7f00", "#2557e6", "#33a02c", "#6a3d9a",
+  "#b15928", "#a6cee3", "#fb9a99", "#fdbf6f", "#cab2d6",
+  "#ffff99", "#1f78b4", "#b2df8a", "#e78ac3", "#66c2a5",
+];
 
 function ProblematicPage() {
   const [startDate, setStartDate] = useState(daysAgo(14));
@@ -32,6 +49,7 @@ function ProblematicPage() {
   const [minDays, setMinDays] = useState(3);
   const [delayFloor, setDelayFloor] = useState(0);
   const [delayCap, setDelayCap] = useState(30);
+  const [selectedPair, setSelectedPair] = useState("");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
 
   const { data, error, isFetching } = useQuery({
@@ -42,21 +60,51 @@ function ProblematicPage() {
 
   const loadData = () => setQueryParams({ start: startDate, end: endDate, late_threshold: lateThreshold, min_days: minDays, delay_cap: delayCap });
 
-  const scatterData = useMemo(() => {
-    if (!data?.offenders) return [];
-    return data.offenders.map((o) => ({
-      x: o.pct_late,
-      y: parseFloat(o.avg_delay),
-      name: o.train_no + " @ " + o.station,
-      z: o.days_seen,
-    }));
+  // Get unique relations for coloring
+  const relationColorMap = useMemo(() => {
+    if (!data?.offenders) return new Map<string, string>();
+    const relations = [...new Set(data.offenders.map((o) => o.relation || "?"))];
+    return new Map(relations.map((r, i) => [r, RELATION_COLORS[i % RELATION_COLORS.length]]));
   }, [data]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const renderDot = (props: any) => {
-    const r = Math.max(3, Math.min(14, 3 + (props.payload.z / 5)));
-    return <circle cx={props.cx} cy={props.cy} r={r} fill="oklch(0.50 0.16 260)" fillOpacity={0.6} stroke="oklch(0.50 0.16 260)" strokeWidth={1} />;
-  };
+  const scatterDataByRelation = useMemo(() => {
+    if (!data?.offenders) return [];
+    const byRelation = new Map<string, Offender[]>();
+    for (const o of data.offenders) {
+      const rel = o.relation || "?";
+      if (!byRelation.has(rel)) byRelation.set(rel, []);
+      byRelation.get(rel)!.push(o);
+    }
+    return Array.from(byRelation.entries()).map(([relation, offenders]) => ({
+      relation,
+      color: relationColorMap.get(relation) || "#888",
+      data: offenders.map((o) => ({
+        x: o.pct_late,
+        y: parseFloat(o.avg_delay),
+        z: o.total_stops || o.days_seen * 5,
+        name: o.train_no + " @ " + o.station,
+      })),
+    }));
+  }, [data, relationColorMap]);
+
+  const maxStops = useMemo(() => {
+    if (!data?.offenders) return 1;
+    return Math.max(...data.offenders.map((o) => o.total_stops || 1), 1);
+  }, [data]);
+
+  // Day-by-day detail for selected pair
+  const selectedDetail = useMemo(() => {
+    if (!selectedPair || !data?.offenders) return null;
+    return data.offenders.find((o) => `${o.train_no}@${o.station}` === selectedPair) ?? null;
+  }, [selectedPair, data]);
+
+  const pairOptions = useMemo(() => {
+    if (!data?.offenders) return [];
+    return data.offenders.slice(0, 200).map((o) => ({
+      value: `${o.train_no}@${o.station}`,
+      label: `${o.train_no} @ ${o.station} (${o.pct_late}%)`,
+    }));
+  }, [data]);
 
   return (
     <Layout
@@ -92,14 +140,16 @@ function ProblematicPage() {
             <MetricCard label="Worst % Late" value={data.offenders[0]?.pct_late ?? 0} suffix="%" danger />
           </div>
 
-          {scatterData.length > 0 && (
+          {scatterDataByRelation.length > 0 && (
             <div className="rounded-2xl border border-border/50 bg-card p-5 shadow-sm mb-4 animate-slide-up">
-              <h3 className="text-sm font-semibold mb-4 text-foreground">Late Rate vs Average Delay</h3>
+              <h3 className="text-sm font-semibold mb-1 text-foreground">Late Rate vs Average Delay</h3>
+              <p className="text-[10px] text-muted-foreground mb-3">Color = train relation/line, bubble size = total stops observed</p>
               <ResponsiveContainer width="100%" height={360}>
                 <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
                   <XAxis dataKey="x" name="% Late" type="number" unit="%" tick={{ fontSize: 11 }} label={{ value: "% Late", position: "insideBottom", offset: -10, fontSize: 12 }} />
                   <YAxis dataKey="y" name="Avg Delay (min)" type="number" unit="m" tick={{ fontSize: 11 }} label={{ value: "Avg Delay (min)", angle: -90, position: "insideLeft", offset: 5, fontSize: 12 }} />
+                  <ZAxis dataKey="z" type="number" range={[20, 400]} domain={[0, maxStops]} />
                   <Tooltip
                     cursor={{ strokeDasharray: "3 3" }}
                     content={({ active, payload }) => {
@@ -108,16 +158,51 @@ function ProblematicPage() {
                       return (
                         <div className="rounded-xl border border-border/50 bg-card px-3 py-2 text-xs shadow-lg">
                           <p className="font-semibold">{d.name}</p>
-                          <p className="text-muted-foreground">Late: {d.x}% | Avg: {d.y}m | Days: {d.z}</p>
+                          <p className="text-muted-foreground">Late: {d.x}% | Avg: {d.y}m | Stops: {d.z}</p>
                         </div>
                       );
                     }}
                   />
-                  <Scatter data={scatterData} fill="oklch(0.50 0.16 260)" fillOpacity={0.6} shape={renderDot} />
+                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  {scatterDataByRelation.map(({ relation, color, data: rData }) => (
+                    <Scatter key={relation} name={relation} data={rData} fill={color + "88"} stroke={color} />
+                  ))}
                 </ScatterChart>
               </ResponsiveContainer>
             </div>
           )}
+
+          {/* Day-by-day detail view */}
+          <div className="rounded-2xl border border-border/50 bg-card p-5 shadow-sm mb-4 animate-slide-up">
+            <h3 className="text-sm font-semibold mb-3 text-foreground">Day-by-Day Detail</h3>
+            <div className="mb-3">
+              <Select value={selectedPair} onValueChange={setSelectedPair}>
+                <SelectOption value="">Select a train-station pair...</SelectOption>
+                {pairOptions.map((o) => <SelectOption key={o.value} value={o.value}>{o.label}</SelectOption>)}
+              </Select>
+            </div>
+            {selectedDetail?.daily && selectedDetail.daily.length > 0 ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={selectedDetail.daily} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                  <XAxis dataKey="date" tick={{ fontSize: 9 }} angle={-30} textAnchor="end" height={50} />
+                  <YAxis tick={{ fontSize: 10 }} label={{ value: "Avg Delay (min)", angle: -90, position: "insideLeft", offset: 5, fontSize: 10 }} />
+                  <Tooltip
+                    contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
+                    formatter={(value: number) => [`${value} min`, "Avg delay"]}
+                  />
+                  <ReferenceLine y={lateThreshold} stroke="oklch(0.65 0.20 25)" strokeDasharray="4 4" label={{ value: "Late threshold", fontSize: 9, fill: "oklch(0.65 0.20 25)" }} />
+                  <Bar
+                    dataKey="avg_delay"
+                    radius={[4, 4, 0, 0]}
+                    fill="oklch(0.55 0.15 250)"
+                    label={false}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-xs text-muted-foreground">Select a pair above to see its daily delay breakdown.</p>
+            )}
+          </div>
 
           <DataTable
             title="Repeat Offenders (sorted by % late)"
@@ -126,7 +211,13 @@ function ProblematicPage() {
             maxRows={100}
             columns={[
               { header: "Train", accessor: (o) => <span className="font-mono font-medium">{o.train_no}</span> },
-              { header: "Station", accessor: (o) => <span className="truncate max-w-[180px] block text-muted-foreground">{o.station}</span> },
+              { header: "Station", accessor: (o) => <span className="truncate max-w-[140px] block text-muted-foreground">{o.station}</span> },
+              { header: "Relation", accessor: (o) => (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: relationColorMap.get(o.relation || "?") || "#888" }} />
+                  <span className="truncate max-w-[80px] text-muted-foreground text-[10px]">{o.relation || "?"}</span>
+                </span>
+              ) },
               { header: "Days", accessor: (o) => <span className="text-muted-foreground">{o.days_seen}</span>, align: "right" },
               {
                 header: "% Late",
@@ -148,10 +239,17 @@ function ProblematicPage() {
                 ),
                 align: "right",
               },
-              { header: "Avg Delay", accessor: (o) => <span className="text-muted-foreground">{o.avg_delay}m</span>, align: "right" },
-              { header: "Max Delay", accessor: (o) => <span className="text-muted-foreground">{o.max_delay}m</span>, align: "right" },
+              { header: "Avg", accessor: (o) => <span className="text-muted-foreground">{o.avg_delay}m</span>, align: "right" },
+              { header: "Max", accessor: (o) => <span className="text-muted-foreground">{o.max_delay}m</span>, align: "right" },
             ]}
           />
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>For each date in the range, all punctuality records are grouped by (train number, station) pairs. Per pair per day: average delay, max delay, and percentage of late stops are computed.</p>
+              <p>These are then aggregated across days. Pairs observed fewer than the minimum days threshold are excluded. The scatter plot colors represent different train relations/lines, and bubble size is proportional to total stops observed. Select a pair to see its day-by-day delay trend.</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 

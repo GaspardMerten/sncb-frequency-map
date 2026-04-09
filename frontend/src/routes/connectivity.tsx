@@ -3,7 +3,7 @@ import { useState, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Layer } from "@deck.gl/core";
 import { BarChart3 } from "lucide-react";
-import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
+import { ScatterChart, Scatter, XAxis, YAxis, ZAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { FilterPanel, type Filters } from "@/components/FilterPanel";
@@ -12,6 +12,8 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -35,9 +37,15 @@ interface ConnectivityData {
 }
 
 const SIZE_COLORS: Record<string, [number, number, number, number]> = {
-  small: [107, 174, 214, 160],
-  medium: [33, 113, 181, 160],
-  big: [8, 69, 148, 160],
+  small: [76, 175, 80, 180],
+  medium: [255, 152, 0, 180],
+  big: [211, 47, 47, 180],
+};
+
+const SIZE_CSS: Record<string, string> = {
+  small: "#4caf50",
+  medium: "#ff9800",
+  big: "#d32f2f",
 };
 
 function ConnectivityPage() {
@@ -114,7 +122,17 @@ function ConnectivityPage() {
     return { count, avgA, avgB, avgC };
   }, [sizeFilteredStations]);
 
-  const renderScatterChart = (xKey: string, yKey: string, xLabel: string, yLabel: string) => {
+  // Get max values for ZAxis domain
+  const zDomains = useMemo(() => {
+    if (!sizeFilteredStations.length) return { maxA: 1, maxB: 1, maxC: 1 };
+    return {
+      maxA: Math.max(...sizeFilteredStations.map((s) => s.reachable), 1),
+      maxB: Math.max(...sizeFilteredStations.map((s) => s.direct_freq), 1),
+      maxC: Math.max(...sizeFilteredStations.map((s) => s.reach_km), 1),
+    };
+  }, [sizeFilteredStations]);
+
+  const renderScatterChart = (xKey: string, yKey: string, zKey: string, xLabel: string, yLabel: string, zLabel: string) => {
     const keyMap: Record<string, (s: Station) => number> = {
       reachable: (s) => s.reachable,
       direct_freq: (s) => s.direct_freq,
@@ -122,20 +140,24 @@ function ConnectivityPage() {
     };
     const getX = keyMap[xKey];
     const getY = keyMap[yKey];
+    const getZ = keyMap[zKey];
+    const maxZ = zKey === "reachable" ? zDomains.maxA : zKey === "direct_freq" ? zDomains.maxB : zDomains.maxC;
 
     return (
       <ResponsiveContainer width="100%" height="100%">
         <ScatterChart>
           <XAxis dataKey="x" name={xLabel} type="number" tick={{ fontSize: 11 }} />
           <YAxis dataKey="y" name={yLabel} type="number" tick={{ fontSize: 11 }} />
+          <ZAxis dataKey="z" name={zLabel} type="number" range={[20, 400]} domain={[0, maxZ]} />
           <Tooltip cursor={{ strokeDasharray: "3 3" }} content={({ payload }) => {
             if (!payload?.[0]) return null;
             const d = payload[0].payload;
             return (
               <div className="bg-card border border-border/50 rounded-xl px-3 py-2 text-xs shadow-lg">
                 <b>{d.name}</b><br />
-                {xLabel}={typeof d.x === "number" && d.x % 1 !== 0 ? d.x.toFixed(1) : d.x},
-                {yLabel}={typeof d.y === "number" && d.y % 1 !== 0 ? d.y.toFixed(1) : d.y}
+                {xLabel}: {typeof d.x === "number" && d.x % 1 !== 0 ? d.x.toFixed(1) : d.x}<br />
+                {yLabel}: {typeof d.y === "number" && d.y % 1 !== 0 ? d.y.toFixed(1) : d.y}<br />
+                {zLabel} (size): {typeof d.z === "number" && d.z % 1 !== 0 ? d.z.toFixed(1) : d.z}
               </div>
             );
           }} />
@@ -144,7 +166,7 @@ function ConnectivityPage() {
             <Scatter
               key={region}
               name={region}
-              data={regionData.map((s) => ({ x: getX(s), y: getY(s), name: s.name }))}
+              data={regionData.map((s) => ({ x: getX(s), y: getY(s), z: getZ(s), name: s.name }))}
               fill={color + "88"}
               stroke={color}
             />
@@ -180,11 +202,14 @@ function ConnectivityPage() {
 
           <div className="border-t border-border/40 pt-3 mt-3">
             <Label>Station Size</Label>
-            {[{ label: "Small (<4 trains/h)", checked: showSmall, set: setShowSmall },
-              { label: "Medium (4-10 trains/h)", checked: showMedium, set: setShowMedium },
-              { label: "Big (>=10 trains/h)", checked: showBig, set: setShowBig }].map((f) => (
+            {[
+              { label: "Small (<4 trains/h)", checked: showSmall, set: setShowSmall, color: SIZE_CSS.small },
+              { label: "Medium (4-10 trains/h)", checked: showMedium, set: setShowMedium, color: SIZE_CSS.medium },
+              { label: "Big (>=10 trains/h)", checked: showBig, set: setShowBig, color: SIZE_CSS.big },
+            ].map((f) => (
               <label key={f.label} className="flex items-center gap-2 text-xs text-foreground/60 cursor-pointer mt-1.5">
                 <input type="checkbox" checked={f.checked} onChange={(e) => f.set(e.target.checked)} className="rounded border-border text-primary" />
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: f.color }} />
                 {f.label}
               </label>
             ))}
@@ -209,24 +234,35 @@ function ConnectivityPage() {
             <MetricCard label="Big" value={fmt(data.n_big)} />
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
-            <DeckMap ref={mapRef} layers={layers} className="h-96" />
+            <div className="space-y-2">
+              <DeckMap ref={mapRef} layers={layers} className="h-96" />
+              <div className="flex gap-4 text-[10px] text-muted-foreground">
+                {Object.entries(SIZE_CSS).map(([size, color]) => (
+                  <span key={size} className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+                    {size}
+                  </span>
+                ))}
+                <span className="ml-auto">Size = direct freq/h</span>
+              </div>
+            </div>
             <div className="bg-card rounded-2xl border border-border/50 p-5 h-96 shadow-sm">
               <Tabs value={scatterTab} onValueChange={setScatterTab} className="h-full flex flex-col">
                 <TabsList className="w-full mb-3">
-                  <TabsTrigger value="ab" className="flex-1 text-xs">A x B</TabsTrigger>
-                  <TabsTrigger value="bc" className="flex-1 text-xs">B x C</TabsTrigger>
-                  <TabsTrigger value="ac" className="flex-1 text-xs">A x C</TabsTrigger>
+                  <TabsTrigger value="ab" className="flex-1 text-xs">A x B (size=C)</TabsTrigger>
+                  <TabsTrigger value="bc" className="flex-1 text-xs">B x C (size=A)</TabsTrigger>
+                  <TabsTrigger value="ac" className="flex-1 text-xs">A x C (size=B)</TabsTrigger>
                 </TabsList>
                 <div className="flex-1">
-                  {scatterTab === "ab" && renderScatterChart("reachable", "direct_freq", "Reachable stations (A)", "Direct freq/h (B)")}
-                  {scatterTab === "bc" && renderScatterChart("direct_freq", "reach_km", "Direct freq/h (B)", "Reach km (C)")}
-                  {scatterTab === "ac" && renderScatterChart("reachable", "reach_km", "Reachable stations (A)", "Reach km (C)")}
+                  {scatterTab === "ab" && renderScatterChart("reachable", "direct_freq", "reach_km", "Reachable (A)", "Freq/h (B)", "Reach km (C)")}
+                  {scatterTab === "bc" && renderScatterChart("direct_freq", "reach_km", "reachable", "Freq/h (B)", "Reach km (C)", "Reachable (A)")}
+                  {scatterTab === "ac" && renderScatterChart("reachable", "reach_km", "direct_freq", "Reachable (A)", "Reach km (C)", "Freq/h (B)")}
                 </div>
               </Tabs>
             </div>
           </div>
 
-          <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm">
+          <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm mb-4">
             <Label className="mb-2 block">Station Size Breakdown</Label>
             <Tabs value={sizeTab} onValueChange={setSizeTab}>
               <TabsList className="w-full mb-3">
@@ -243,6 +279,13 @@ function ConnectivityPage() {
               <MetricCard label="Avg Reach (C)" value={sizeAvg.avgC.toFixed(0)} suffix=" km" />
             </div>
           </div>
+
+          <MethodologyPanel>
+            <p><b>Metric A (Reachable Destinations):</b> BFS-based reachability count within the time budget, considering transfers.</p>
+            <p><b>Metric B (Direct Frequency):</b> Average direct trains per hour between 6h-22h, normalized across GTFS feeds.</p>
+            <p><b>Metric C (Cardinal Reach):</b> Maximum geographic reach distance in each cardinal direction (N/E/S/W), summed to represent geographic extent.</p>
+            <p>Station size classification: Small (&lt;4 trains/h), Medium (4-10), Big (&gt;10). Bubble size in scatter plots encodes the third metric not shown on axes.</p>
+          </MethodologyPanel>
         </>
       )}
 

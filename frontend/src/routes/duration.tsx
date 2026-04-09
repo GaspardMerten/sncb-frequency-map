@@ -12,15 +12,18 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
-import { colorToRGBA, heatmapLayer } from "@/lib/layers";
+import { colorToRGBA, heatmapLayer, choroplethLayer } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
+import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
 
 export const durationRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -36,7 +39,7 @@ interface DurationData {
 
 type Aggregation = "average" | "min" | "max";
 type TransportMode = "walk" | "bike" | "car";
-type ViewMode = "stations" | "gradient";
+type ViewMode = "stations" | "gradient" | "provinces" | "regions";
 
 const TRANSPORT_SPEEDS: Record<TransportMode, number> = {
   walk: 5,
@@ -68,6 +71,11 @@ function DurationPage() {
     enabled: !!queryParams,
   });
 
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
   const loadData = () => {
     if (!selectedDests.length) return;
     setQueryParams({
@@ -89,6 +97,51 @@ function DurationPage() {
     if (!data || data.error) return [];
 
     const maxDur = timeBudget * 60;
+
+    if (viewMode === "provinces" && geoData && data.stations.length) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.duration,
+      );
+      const valueMap = new Map<string, number>();
+      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("duration-province-choropleth", enriched, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
+
+    if (viewMode === "regions" && geoData && data.stations.length) {
+      const byProvince = aggregateByProvince(
+        data.stations, geoData,
+        (d) => d.lon, (d) => d.lat, (d) => d.duration,
+      );
+      const regionAgg = new Map<string, { sum: number; count: number }>();
+      for (const [province, agg] of byProvince) {
+        const region = getRegion(province);
+        const existing = regionAgg.get(region);
+        if (existing) {
+          existing.sum += agg.sum;
+          existing.count += agg.count;
+        } else {
+          regionAgg.set(region, { sum: agg.sum, count: agg.count });
+        }
+      }
+      const valueMap = new Map<string, number>();
+      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
+      const maxVal = Math.max(...valueMap.values(), 1);
+      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
+
+      return [choroplethLayer("duration-region-choropleth", regionGeo, {
+        valueFn: (f) => f.properties._value,
+        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
+        pickable: true,
+      })] as Layer[];
+    }
 
     if (viewMode === "gradient") {
       const heat = heatmapLayer("duration-heat", data.stations, {
@@ -140,7 +193,7 @@ function DurationPage() {
     });
 
     return [stationsLayer, destLayer] as Layer[];
-  }, [data, viewMode, timeBudget]);
+  }, [data, geoData, viewMode, timeBudget]);
 
   return (
     <Layout
@@ -171,6 +224,8 @@ function DurationPage() {
               <TabsList className="w-full">
                 <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
                 <TabsTrigger value="gradient" className="flex-1">Gradient</TabsTrigger>
+                <TabsTrigger value="provinces" className="flex-1">Provinces</TabsTrigger>
+                <TabsTrigger value="regions" className="flex-1">Regions</TabsTrigger>
               </TabsList>
             </Tabs>
           </div>
@@ -241,7 +296,17 @@ function DurationPage() {
             <MetricCard label="Max" value={fmt(data.max_duration, 0)} suffix=" min" />
           </div>
 
-          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+          <div className="space-y-2">
+            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+            <ColorLegend min="Short travel time" max="Long travel time" />
+          </div>
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>Travel duration is computed using BFS on the GTFS timetable graph. For "To destination" mode, a reverse search finds all stations that can reach the destination within the time budget. For "From destination", forward BFS explores outbound connections.</p>
+              <p>Multiple destinations can be combined using Average, Min, or Max aggregation. The gradient view adds first/last-mile transport time based on the selected mode (Walk 5km/h, Bike 15km/h, Car 50km/h).</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 

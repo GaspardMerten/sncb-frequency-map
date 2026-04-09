@@ -3,6 +3,7 @@ import { useState, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Train } from "lucide-react";
 import type { Layer } from "@deck.gl/core";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { FilterPanel, type Filters } from "@/components/FilterPanel";
@@ -12,6 +13,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { fetchApi } from "@/lib/api";
@@ -53,6 +56,24 @@ function SegmentsPage() {
   });
 
   const loadData = () => setQueryParams(filterParams(filters));
+
+  // Province data for bar charts
+  const provinceData = useMemo(() => {
+    if (!data || !geoData) return [];
+    const byProvince = aggregateByProvince(
+      data.stations, geoData,
+      (d) => d.lon, (d) => d.lat, (d) => d.freq,
+    );
+    return Array.from(byProvince.entries())
+      .map(([name, agg]) => ({
+        name: name.length > 12 ? name.slice(0, 12) + "..." : name,
+        fullName: name,
+        avg: Math.round(agg.avg * 10) / 10,
+        sum: Math.round(agg.sum),
+        count: agg.count,
+      }))
+      .sort((a, b) => b.avg - a.avg);
+  }, [data, geoData]);
 
   const layers = useMemo<Layer[]>(() => {
     if (!data || data.error) return [];
@@ -179,7 +200,42 @@ function SegmentsPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+          <div className="space-y-2">
+            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+            <ColorLegend min="Low frequency" max="High frequency" />
+          </div>
+
+          {(viewMode === "provinces" || viewMode === "regions") && provinceData.length > 0 && (
+            <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm mt-4 animate-slide-up">
+              <h3 className="text-sm font-semibold text-foreground mb-4">
+                {viewMode === "provinces" ? "Avg Frequency by Province" : "Avg Frequency by Region"}
+              </h3>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={viewMode === "regions" ? provinceData.reduce((acc, p) => {
+                  // Group by region for region view
+                  const region = getRegion(p.fullName);
+                  const existing = acc.find((r) => r.name === region);
+                  if (existing) {
+                    existing.sum += p.sum;
+                    existing.count += p.count;
+                    existing.avg = Math.round(existing.sum / existing.count * 10) / 10;
+                  } else {
+                    acc.push({ name: region, sum: p.sum, count: p.count, avg: p.avg, fullName: region });
+                  }
+                  return acc;
+                }, [] as typeof provinceData) : provinceData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                  <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" height={50} />
+                  <YAxis tick={{ fontSize: 10 }} />
+                  <Tooltip
+                    contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
+                    formatter={(value: number) => [`${value}`, "Avg trains/day"]}
+                  />
+                  <Bar dataKey="avg" fill="oklch(0.55 0.15 250)" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
           {viewMode === "stations" && (
             <div className="mt-4 animate-slide-up">
               <DataTable
@@ -194,6 +250,13 @@ function SegmentsPage() {
               />
             </div>
           )}
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>Segment frequencies are computed from GTFS stop_times: consecutive stops in each trip define a segment. Frequencies are summed across all matching trips and normalized by the number of service days.</p>
+              <p>Segments are matched to Infrabel track infrastructure geometry. When a direct match isn't found, BFS path-finding through the track network is attempted (up to 30 hops). Unmatched segments fall back to straight-line geometry.</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 

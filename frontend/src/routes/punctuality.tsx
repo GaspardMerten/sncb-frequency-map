@@ -2,6 +2,7 @@ import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlarmClock } from "lucide-react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { MetricCard } from "@/components/MetricCard";
@@ -10,6 +11,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -17,7 +20,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { stationLayer, colorToRGBA } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
-import { fmt, daysAgo } from "@/lib/utils";
+import { fmt, daysAgo, valueToColor } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 export const punctualityRoute = createRoute({
@@ -27,7 +30,8 @@ export const punctualityRoute = createRoute({
 });
 
 interface PunctStation { name: string; lat: number; lon: number; avg_delay: number; n_trains: number; pct_late: number; }
-interface PunctData { summary: { n_stations: number; avg_delay: string; median_delay: string; pct_late: string }; stations: PunctStation[]; error?: string; }
+interface HourlyEntry { hour: number; avg_delay: number; n_trains: number; }
+interface PunctData { summary: { n_stations: number; avg_delay: string; median_delay: string; pct_late: string }; stations: PunctStation[]; hourly?: HourlyEntry[]; error?: string; }
 
 function PunctualityPage() {
   const [targetDate, setTargetDate] = useState(daysAgo(2));
@@ -77,6 +81,12 @@ function PunctualityPage() {
   const handleRowClick = (s: PunctStation) => {
     mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 12 });
   };
+
+  // Compute max delay for hourly chart color scaling
+  const maxHourlyDelay = useMemo(() => {
+    if (!data?.hourly) return 1;
+    return Math.max(...data.hourly.map((h) => h.avg_delay), 1);
+  }, [data]);
 
   return (
     <Layout
@@ -138,8 +148,9 @@ function PunctualityPage() {
       {data && !data.error && !isFetching && (
         <>
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-            <div className="xl:col-span-2">
+            <div className="xl:col-span-2 space-y-2">
               <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+              <ColorLegend min="On time" max="Very late" label="Delay" />
             </div>
             <DataTable
               title="Most Delayed Stations"
@@ -156,9 +167,33 @@ function PunctualityPage() {
             />
           </div>
 
-          <div className="mt-4 rounded-2xl border border-border/50 bg-card p-5 shadow-sm animate-slide-up">
-            <h3 className="text-sm font-semibold mb-1 text-foreground">Hourly Delay Analysis</h3>
-            <p className="text-xs text-muted-foreground">Hourly analysis requires per-train data not available from the current station-level API response.</p>
+          {data.hourly && data.hourly.length > 0 && (
+            <div className="mt-4 bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
+              <h3 className="text-sm font-semibold text-foreground mb-4">Hourly Average Delay</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={data.hourly} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                  <XAxis dataKey="hour" tick={{ fontSize: 10 }} tickFormatter={(h) => `${h}h`} />
+                  <YAxis tick={{ fontSize: 10 }} label={{ value: "Avg delay (min)", angle: -90, position: "insideLeft", offset: 5, fontSize: 10 }} />
+                  <Tooltip
+                    contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
+                    formatter={(value: number) => [`${value} min`, "Avg delay"]}
+                    labelFormatter={(h) => `${h}:00 - ${h}:59`}
+                  />
+                  <Bar dataKey="avg_delay" radius={[4, 4, 0, 0]}>
+                    {data.hourly.map((entry, index) => (
+                      <Cell key={index} fill={valueToColor(entry.avg_delay / maxHourlyDelay)} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>Punctuality data comes from the Infrabel real-time feed, providing actual vs. planned departure/arrival times for each train at each station. Delay is computed as the difference in seconds, converted to minutes.</p>
+              <p>Delays below the floor are set to 0 (on-time), and delays above the cap are clamped. Circle size represents train frequency at the station, while color represents average delay magnitude. The hourly chart shows how delays vary throughout the day.</p>
+            </MethodologyPanel>
           </div>
         </>
       )}

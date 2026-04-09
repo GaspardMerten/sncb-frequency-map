@@ -11,6 +11,8 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
+import { ColorLegend } from "@/components/ColorLegend";
+import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -19,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { fetchApi } from "@/lib/api";
 import { fmt, daysAgo } from "@/lib/utils";
+import { stationLayer } from "@/lib/layers";
 
 export const accessibilityRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -27,12 +30,20 @@ export const accessibilityRoute = createRoute({
 });
 
 const ALL_OPS = ["SNCB", "De Lijn", "STIB", "TEC"];
+const OP_COLORS: Record<string, [number, number, number, number]> = {
+  SNCB: [8, 69, 148, 200],
+  "De Lijn": [255, 215, 0, 200],
+  STIB: [227, 6, 19, 200],
+  TEC: [0, 165, 80, 200],
+};
 
 type ViewMode = "gradient" | "stations";
 
+interface StopEntry { name: string; lat: number; lon: number; operator: string; }
+
 interface AccessibilityData {
   n_stops: number; median_time: number; mean_time: number; p95_time: number; pct_10min: number;
-  image_b64?: string; error?: string;
+  image_b64?: string; stops?: StopEntry[]; error?: string;
 }
 
 function AccessibilityPage() {
@@ -66,6 +77,16 @@ function AccessibilityPage() {
   const toggleList = (list: string[], setList: (v: string[]) => void, item: string) =>
     setList(list.includes(item) ? list.filter((o) => o !== item) : [...list, item]);
 
+  // Group stops by operator for count display
+  const stopsByOp = useMemo(() => {
+    if (!data?.stops) return new Map<string, number>();
+    const map = new Map<string, number>();
+    for (const s of data.stops) {
+      map.set(s.operator, (map.get(s.operator) || 0) + 1);
+    }
+    return map;
+  }, [data]);
+
   const layers = useMemo<Layer[]>(() => {
     if (!data || data.error) return [];
 
@@ -76,6 +97,20 @@ function AccessibilityPage() {
           image: "data:image/png;base64," + data.image_b64,
           bounds: [2.55, 49.5, 6.41, 51.51],
           opacity: 0.75,
+        }),
+      ] as Layer[];
+    }
+
+    // Stations view
+    if (viewMode === "stations" && data.stops?.length) {
+      return [
+        stationLayer("accessibility-stops", data.stops, {
+          positionFn: (d) => [d.lon, d.lat],
+          radiusFn: () => 3,
+          colorFn: (d) => OP_COLORS[d.operator] || [51, 51, 51, 160],
+          radiusMinPixels: 2,
+          radiusMaxPixels: 8,
+          pickable: true,
         }),
       ] as Layer[];
     }
@@ -92,7 +127,10 @@ function AccessibilityPage() {
             <div className="space-y-1.5 mt-1.5">
               {ALL_OPS.map((op) => (
                 <div key={op} className="flex items-center justify-between text-xs text-foreground/60">
-                  <span>{op}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: `rgba(${OP_COLORS[op]?.slice(0, 3).join(",")},1)` }} />
+                    {op}
+                  </span>
                   <Switch checked={destOperators.includes(op)} onCheckedChange={() => toggleList(destOperators, setDestOperators, op)} />
                 </div>
               ))}
@@ -174,13 +212,32 @@ function AccessibilityPage() {
             <MetricCard label="95th pct" value={data.p95_time} suffix="min" />
             <MetricCard label="<= 10 min" value={data.pct_10min} suffix="%" />
           </div>
-          {viewMode === "stations" ? (
-            <div className="flex items-center justify-center h-[calc(100vh-16rem)] border border-dashed border-border/60 rounded-lg">
-              <p className="text-sm text-muted-foreground">Stations view requires stop-level data from the API</p>
-            </div>
-          ) : (
+
+          <div className="space-y-2">
             <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
-          )}
+            {viewMode === "gradient" && <ColorLegend min="Close (fast)" max="Far (slow)" />}
+            {viewMode === "stations" && (
+              <div className="flex gap-4 text-[10px] text-muted-foreground">
+                {ALL_OPS.map((op) => {
+                  const count = stopsByOp.get(op) || 0;
+                  if (!count) return null;
+                  return (
+                    <span key={op} className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: `rgba(${OP_COLORS[op]?.slice(0, 3).join(",")},1)` }} />
+                      {op} ({fmt(count)})
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4">
+            <MethodologyPanel>
+              <p>For each point on a grid covering Belgium, the time to the nearest transit stop is computed using Manhattan distance and the selected transport speed (Walk 5km/h, Bike 15km/h, Car 50km/h).</p>
+              <p>When feeder transit is enabled, a BFS expands from destination stops through the feeder network, effectively increasing the reach of the destination operator. The gradient view renders green (close) to red (far). The stations view shows all stops colored by operator.</p>
+            </MethodologyPanel>
+          </div>
         </>
       )}
 
