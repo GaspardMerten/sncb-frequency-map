@@ -1,0 +1,88 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-background: oklch(0.99 0.002 240);
+  --color-foreground: oklch(0.25 0.02 250);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.25 0.02 250);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.25 0.02 250);
+  --color-primary: oklch(0.48 0.14 250);
+  --color-primary-foreground: oklch(0.98 0.005 240);
+  --color-secondary: oklch(0.94 0.015 240);
+  --color-secondary-foreground: oklch(0.3 0.03 250);
+  --color-muted: oklch(0.96 0.01 240);
+  --color-muted-foreground: oklch(0.55 0.02 250);
+  --color-accent: oklch(0.94 0.015 240);
+  --color-accent-foreground: oklch(0.3 0.03 250);
+  --color-destructive: oklch(0.55 0.2 25);
+  --color-destructive-foreground: oklch(0.98 0.01 25);
+  --color-border: oklch(0.9 0.02 240);
+  --color-input: oklch(0.9 0.02 240);
+  --color-ring: oklch(0.48 0.14 250);
+  --color-brand-50: #f0f4fa;
+  --color-brand-100: #dce6f5;
+  --color-brand-200: #b8d4f0;
+  --color-brand-300: #84b5e0;
+  --color-brand-400: #4a92cc;
+  --color-brand-500: #2171b5;
+  --color-brand-600: #084594;
+  --color-brand-700: #063570;
+  --color-brand-800: #04264d;
+  --color-brand-900: #021729;
+  --radius: 0.625rem;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-brand-200);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-brand-300);
+}
+
+/* MapLibre overrides */
+.maplibregl-popup-content {
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-brand-200);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Skeleton shimmer animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(90deg, var(--color-muted) 25%, var(--color-brand-50) 50%, var(--color-muted) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Bounce dot for loading indicators */
+@keyframes bounce-dot {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+/* Pulsing ring for loading state */
+@keyframes loading-ring {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50% { transform: scale(1.15); opacity: 0.1; }
+}

@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}Multimodal Duration — MobilityTwin{% endblock %}
+{% block nav_multimodal %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="multimodalPage()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Operators</p>
+    <div class="space-y-1">
+        <template x-for="op in allOperators" :key="op">
+            <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+                <input type="checkbox" :value="op" x-model="selectedOps" class="rounded border-brand-200 text-brand-500">
+                <span x-text="op"></span>
+            </label>
+        </template>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3 space-y-2">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Travel Settings</p>
+        <div>
+            <label class="text-[10px] text-gray-500">Direction</label>
+            <div class="flex gap-1">
+                <button @click="direction = 'from'"
+                    :class="direction === 'from' ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                    class="flex-1 py-1.5 rounded-md text-xs font-medium transition-colors">From</button>
+                <button @click="direction = 'to'"
+                    :class="direction === 'to' ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                    class="flex-1 py-1.5 rounded-md text-xs font-medium transition-colors">To</button>
+            </div>
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Time budget (hours)</label>
+            <input type="number" x-model.number="timeBudget" min="0.5" max="4" step="0.5"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Departure window</label>
+            <div class="flex items-center gap-2">
+                <input type="number" x-model.number="depStart" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+                <span class="text-xs text-gray-400">to</span>
+                <input type="number" x-model.number="depEnd" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+            </div>
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Max transfers</label>
+            <input type="number" x-model.number="maxTransfers" min="0" max="5"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Last-mile mode</label>
+            <div class="flex gap-1">
+                <template x-for="m in ['Walk', 'Bike', 'Car']" :key="m">
+                    <button @click="lastMile = m"
+                        :class="lastMile === m ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                        class="flex-1 py-1.5 rounded-md text-xs font-medium transition-colors" x-text="m">
+                    </button>
+                </template>
+            </div>
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Date</label>
+            <input type="date" x-model="travelDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()" :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Compute</span>
+            <span x-show="loading" x-cloak>Computing...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="multimodalPage()">
+    <div class="mb-4">
+        <label class="text-xs text-gray-500 block mb-1">Address</label>
+        <input type="text" x-model="address" placeholder="e.g. Rue de la Loi 1, Brussels"
+               @keydown.enter="loadData()"
+               class="w-full md:w-96 text-sm border border-brand-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+    </div>
+
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Computing multimodal routes...</p>
+        </div>
+    </div>
+
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">🚌</div>
+            <p class="text-sm text-gray-400">Enter an address and click Compute</p>
+        </div>
+    </div>
+
+    <div x-show="data && !loading" x-cloak>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Reachable Stops</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.n_reachable) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Avg Duration</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.avg_duration, 0) + ' min' : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Operators Used</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? data.operators_used : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Address</div>
+                <div class="text-sm font-medium text-brand-500 truncate" x-text="data ? data.geocoded_address : '—'"></div>
+            </div>
+        </div>
+        <div id="multimodal-map" class="w-full h-[calc(100vh-20rem)] rounded-xl border border-gray-200 shadow-sm"></div>
+    </div>
+
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function multimodalPage() {
+    const today = new Date().toISOString().slice(0, 10);
+    return {
+        allOperators: ['SNCB', 'De Lijn', 'STIB', 'TEC'],
+        selectedOps: ['SNCB', 'De Lijn', 'STIB', 'TEC'],
+        direction: 'from',
+        timeBudget: 1.5,
+        depStart: 7,
+        depEnd: 9,
+        maxTransfers: 3,
+        lastMile: 'Walk',
+        travelDate: today,
+        address: '',
+        loading: false,
+        data: null,
+        error: null,
+        map: null,
+        layerGroup: null,
+
+        async loadData() {
+            if (!this.address) { this.error = 'Enter an address'; return; }
+            this.loading = true;
+            this.error = null;
+            try {
+                this.data = await MT.fetchApi('/multimodal', {
+                    address: this.address,
+                    operators: this.selectedOps.join(','),
+                    direction: this.direction,
+                    time_budget: this.timeBudget,
+                    dep_start: this.depStart,
+                    dep_end: this.depEnd,
+                    max_transfers: this.maxTransfers,
+                    last_mile: this.lastMile,
+                    travel_date: this.travelDate,
+                });
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                } else {
+                    this.$nextTick(() => this.renderMap());
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+
+        renderMap() {
+            if (!document.getElementById('multimodal-map')) return;
+            if (!this.map) {
+                this.map = MT.createMap('multimodal-map');
+                this.layerGroup = L.layerGroup().addTo(this.map);
+            }
+            this.layerGroup.clearLayers();
+
+            if (this.data.origin) {
+                L.marker([this.data.origin.lat, this.data.origin.lon], {
+                    icon: L.divIcon({
+                        className: '',
+                        html: '<div style="width:14px;height:14px;background:#e31a1c;border:2px solid white;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,.3)"></div>',
+                        iconSize: [14, 14],
+                        iconAnchor: [7, 7],
+                    }),
+                }).bindTooltip(this.data.geocoded_address).addTo(this.layerGroup);
+            }
+
+            const opColors = { SNCB: '#084594', 'De Lijn': '#FFD700', STIB: '#E30613', TEC: '#00A550' };
+            const maxDur = this.timeBudget * 60;
+
+            for (const s of (this.data.stations || [])) {
+                const ratio = s.duration / maxDur;
+                L.circleMarker([s.lat, s.lon], {
+                    radius: 4,
+                    color: opColors[s.operator] || '#333',
+                    fillColor: MT.valueToColor(ratio),
+                    fillOpacity: 0.7,
+                    weight: 1,
+                }).bindTooltip(`<b>${s.name}</b> (${s.operator})<br>${Math.round(s.duration)} min`)
+                  .addTo(this.layerGroup);
+            }
+
+            if (this.data.origin) {
+                this.map.flyTo([this.data.origin.lat, this.data.origin.lon], 11, { duration: 0.5 });
+            }
+        },
+    };
+}
+</script>
+{% endblock %}

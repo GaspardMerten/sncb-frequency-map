@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Missed Connections — MobilityTwin{% endblock %}
+{% block nav_missed %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="missedPage()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Date Range</p>
+    <div class="grid grid-cols-2 gap-2">
+        <div>
+            <label class="text-[10px] text-gray-500">From</label>
+            <input type="date" x-model="startDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">To</label>
+            <input type="date" x-model="endDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3 space-y-2">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Connection Settings</p>
+        <div>
+            <label class="text-[10px] text-gray-500">Min transfer time (min)</label>
+            <input type="number" x-model.number="minTransfer" min="1" max="10"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Max transfer time (min)</label>
+            <input type="number" x-model.number="maxTransfer" min="5" max="60"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Hour window</label>
+            <div class="flex items-center gap-2">
+                <input type="number" x-model.number="hourStart" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+                <span class="text-xs text-gray-400">to</span>
+                <input type="number" x-model.number="hourEnd" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+            </div>
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Min planned connections</label>
+            <input type="number" x-model.number="minConnections" min="1" max="100"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()" :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Analyse</span>
+            <span x-show="loading" x-cloak>Loading...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="missedPage()">
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Analysing missed connections...</p>
+        </div>
+    </div>
+
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">🔗</div>
+            <p class="text-sm text-gray-400">Configure dates and click Analyse</p>
+        </div>
+    </div>
+
+    <div x-show="data && !loading" x-cloak>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Total Connections</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.total_connections) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Missed</div>
+                <div class="text-xl font-bold text-red-500" x-text="data ? MT.fmt(data.total_missed) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">% Missed</div>
+                <div class="text-xl font-bold" :class="(data && data.pct_missed > 10) ? 'text-red-500' : 'text-brand-500'" x-text="data ? data.pct_missed + '%' : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Worst Station</div>
+                <div class="text-sm font-bold text-brand-500 truncate" x-text="data && data.stations.length ? data.stations[0].name : '—'"></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div class="xl:col-span-2">
+                <div id="missed-map" class="w-full h-[calc(100vh-14rem)] rounded-xl border border-gray-200 shadow-sm"></div>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div class="px-4 py-3 border-b border-gray-100">
+                    <h3 class="text-sm font-semibold text-gray-700">Stations by Missed Connections</h3>
+                </div>
+                <div class="max-h-[calc(100vh-18rem)] overflow-y-auto">
+                    <table class="w-full text-xs">
+                        <thead class="bg-gray-50 sticky top-0">
+                            <tr>
+                                <th class="px-3 py-2 text-left text-gray-500 font-medium">Station</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">Planned</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">Missed</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">%</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in (data ? data.stations.slice(0, 40) : [])" :key="s.name">
+                                <tr class="border-t border-gray-50 hover:bg-brand-50/50 cursor-pointer" @click="flyTo(s)">
+                                    <td class="px-3 py-2 font-medium text-gray-700 truncate max-w-[130px]" x-text="s.name"></td>
+                                    <td class="px-3 py-2 text-right text-gray-500" x-text="MT.fmt(s.planned)"></td>
+                                    <td class="px-3 py-2 text-right text-red-500 font-semibold" x-text="MT.fmt(s.missed)"></td>
+                                    <td class="px-3 py-2 text-right" :class="s.pct_missed > 15 ? 'text-red-500 font-semibold' : 'text-gray-500'" x-text="s.pct_missed + '%'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function missedPage() {
+    const today = new Date();
+    const weekAgo = new Date(today);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    return {
+        startDate: weekAgo.toISOString().slice(0, 10),
+        endDate: yesterday.toISOString().slice(0, 10),
+        minTransfer: 2,
+        maxTransfer: 30,
+        hourStart: 0,
+        hourEnd: 24,
+        minConnections: 10,
+        loading: false,
+        data: null,
+        error: null,
+        map: null,
+        layerGroup: null,
+
+        async loadData() {
+            this.loading = true;
+            this.error = null;
+            try {
+                this.data = await MT.fetchApi('/missed', {
+                    start: this.startDate,
+                    end: this.endDate,
+                    min_transfer: this.minTransfer,
+                    max_transfer: this.maxTransfer,
+                    hour_start: this.hourStart,
+                    hour_end: this.hourEnd,
+                    min_connections: this.minConnections,
+                });
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                } else {
+                    this.$nextTick(() => this.renderMap());
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+
+        renderMap() {
+            if (!document.getElementById('missed-map')) return;
+            if (!this.map) {
+                this.map = MT.createMap('missed-map');
+                this.layerGroup = L.layerGroup().addTo(this.map);
+            }
+            this.layerGroup.clearLayers();
+
+            const stations = this.data.stations;
+            if (!stations.length) return;
+            const maxMissed = Math.max(...stations.map(s => s.missed));
+
+            for (const s of stations) {
+                if (!s.lat || !s.lon) continue;
+                const ratio = s.missed / Math.max(maxMissed, 1);
+                const radius = 4 + ratio * 16;
+                L.circleMarker([s.lat, s.lon], {
+                    radius,
+                    color: MT.valueToColor(ratio),
+                    fillColor: MT.valueToColor(ratio),
+                    fillOpacity: 0.7,
+                    weight: 1,
+                }).bindTooltip(
+                    `<b>${s.name}</b><br>` +
+                    `Planned: ${s.planned} | Missed: ${s.missed} (${s.pct_missed}%)`
+                ).addTo(this.layerGroup);
+            }
+        },
+
+        flyTo(station) {
+            if (this.map && station.lat && station.lon) {
+                this.map.flyTo([station.lat, station.lon], 12, { duration: 0.5 });
+            }
+        },
+    };
+}
+</script>
+{% endblock %}

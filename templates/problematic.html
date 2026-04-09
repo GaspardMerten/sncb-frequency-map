@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Problematic Trains — MobilityTwin{% endblock %}
+{% block nav_problematic %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="problematicPage()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Date Range</p>
+    <div class="grid grid-cols-2 gap-2">
+        <div>
+            <label class="text-[10px] text-gray-500">From</label>
+            <input type="date" x-model="startDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">To</label>
+            <input type="date" x-model="endDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3 space-y-2">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Thresholds</p>
+        <div>
+            <label class="text-[10px] text-gray-500">Late threshold (min)</label>
+            <input type="number" x-model.number="lateThreshold" min="1" max="30" step="0.5"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Min days observed</label>
+            <input type="number" x-model.number="minDays" min="1" max="30"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Delay cap (min)</label>
+            <input type="number" x-model.number="delayCap" min="1" max="120"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()" :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Analyse</span>
+            <span x-show="loading" x-cloak>Loading...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="problematicPage()">
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Analysing train performance...</p>
+        </div>
+    </div>
+
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">🚂</div>
+            <p class="text-sm text-gray-400">Configure dates and click Analyse</p>
+        </div>
+    </div>
+
+    <div x-show="data && !loading" x-cloak>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Train-Station Pairs</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.n_pairs) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Repeat Offenders</div>
+                <div class="text-xl font-bold text-red-500" x-text="data ? MT.fmt(data.n_offenders) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Worst Train</div>
+                <div class="text-lg font-bold text-brand-500 truncate" x-text="data && data.offenders.length ? data.offenders[0].train_no : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Worst % Late</div>
+                <div class="text-xl font-bold text-red-500" x-text="data && data.offenders.length ? data.offenders[0].pct_late + '%' : '—'"></div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-100">
+                <h3 class="text-sm font-semibold text-gray-700">Repeat Offenders (sorted by % late)</h3>
+            </div>
+            <div class="max-h-[calc(100vh-20rem)] overflow-y-auto">
+                <table class="w-full text-xs">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="px-4 py-2 text-left text-gray-500 font-medium">Train</th>
+                            <th class="px-4 py-2 text-left text-gray-500 font-medium">Station</th>
+                            <th class="px-4 py-2 text-right text-gray-500 font-medium">Days</th>
+                            <th class="px-4 py-2 text-right text-gray-500 font-medium">% Late</th>
+                            <th class="px-4 py-2 text-right text-gray-500 font-medium">Avg Delay</th>
+                            <th class="px-4 py-2 text-right text-gray-500 font-medium">Max Delay</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="(o, i) in (data ? data.offenders.slice(0, 100) : [])" :key="i">
+                            <tr class="border-t border-gray-50 hover:bg-brand-50/50">
+                                <td class="px-4 py-2 font-mono font-medium text-gray-700" x-text="o.train_no"></td>
+                                <td class="px-4 py-2 text-gray-600 truncate max-w-[180px]" x-text="o.station"></td>
+                                <td class="px-4 py-2 text-right text-gray-500" x-text="o.days_seen"></td>
+                                <td class="px-4 py-2 text-right font-semibold" :class="o.pct_late > 75 ? 'text-red-600' : o.pct_late > 50 ? 'text-orange-500' : 'text-gray-600'" x-text="o.pct_late + '%'"></td>
+                                <td class="px-4 py-2 text-right text-gray-500" x-text="o.avg_delay + 'm'"></td>
+                                <td class="px-4 py-2 text-right text-gray-500" x-text="o.max_delay + 'm'"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function problematicPage() {
+    const today = new Date();
+    const twoWeeksAgo = new Date(today);
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    return {
+        startDate: twoWeeksAgo.toISOString().slice(0, 10),
+        endDate: yesterday.toISOString().slice(0, 10),
+        lateThreshold: 5.0,
+        minDays: 3,
+        delayCap: 30,
+        loading: false,
+        data: null,
+        error: null,
+
+        async loadData() {
+            this.loading = true;
+            this.error = null;
+            try {
+                this.data = await MT.fetchApi('/problematic', {
+                    start: this.startDate,
+                    end: this.endDate,
+                    late_threshold: this.lateThreshold,
+                    min_days: this.minDays,
+                    delay_cap: this.delayCap,
+                });
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+    };
+}
+</script>
+{% endblock %}

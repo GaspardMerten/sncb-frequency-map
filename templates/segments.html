@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Segment Frequency — MobilityTwin{% endblock %}
+{% block nav_segments %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="segmentsPage()" x-init="init()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">View</p>
+    <div class="flex gap-1 mb-3">
+        <template x-for="v in ['segments', 'stations']" :key="v">
+            <button @click="viewMode = v; render()"
+                :class="viewMode === v ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                class="px-3 py-1.5 rounded-md text-xs font-medium capitalize transition-colors" x-text="v">
+            </button>
+        </template>
+    </div>
+
+    {% include "partials/filters.html" %}
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()"
+            :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Apply Filters</span>
+            <span x-show="loading" x-cloak>Loading...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="segmentsPage()">
+    <!-- Metrics -->
+    <div x-show="data" x-cloak class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Segments</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.segments.length) : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Stations</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.stations.length) : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Busiest</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data && data.stations.length ? data.stations[0].name : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Avg Days</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? data.day_count : '—'"></div>
+        </div>
+    </div>
+
+    <!-- Loading -->
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Loading GTFS data...</p>
+        </div>
+    </div>
+
+    <!-- Empty state -->
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">🚆</div>
+            <p class="text-sm text-gray-400">Configure filters and click Apply</p>
+        </div>
+    </div>
+
+    <!-- Map -->
+    <div x-show="data && !loading" x-cloak>
+        <div id="segments-map" class="w-full h-[calc(100vh-14rem)] rounded-xl border border-gray-200 shadow-sm"></div>
+    </div>
+
+    <!-- Station table -->
+    <div x-show="data && viewMode === 'stations'" x-cloak class="mt-4">
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-100">
+                <h3 class="text-sm font-semibold text-gray-700">Top Stations by Frequency</h3>
+            </div>
+            <div class="max-h-80 overflow-y-auto">
+                <table class="w-full text-xs">
+                    <thead class="bg-gray-50 sticky top-0">
+                        <tr>
+                            <th class="px-4 py-2 text-left text-gray-500 font-medium">#</th>
+                            <th class="px-4 py-2 text-left text-gray-500 font-medium">Station</th>
+                            <th class="px-4 py-2 text-right text-gray-500 font-medium">Trains/day</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="(s, i) in (data ? data.stations.slice(0, 50) : [])" :key="s.id">
+                            <tr class="border-t border-gray-50 hover:bg-brand-50/50">
+                                <td class="px-4 py-2 text-gray-400" x-text="i + 1"></td>
+                                <td class="px-4 py-2 font-medium text-gray-700" x-text="s.name"></td>
+                                <td class="px-4 py-2 text-right text-brand-500 font-semibold" x-text="MT.fmt(s.freq, 1)"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error -->
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function segmentsPage() {
+    return {
+        filters: MT.defaultFilters(),
+        viewMode: 'segments',
+        loading: false,
+        data: null,
+        error: null,
+        map: null,
+        layerGroup: null,
+
+        toggleWeekday(i) {
+            const idx = this.filters.weekdays.indexOf(i);
+            if (idx >= 0) this.filters.weekdays.splice(idx, 1);
+            else this.filters.weekdays.push(i);
+        },
+
+        init() {
+            this.$nextTick(() => {
+                if (!this.map && document.getElementById('segments-map')) {
+                    this.map = MT.createMap('segments-map');
+                    this.layerGroup = L.layerGroup().addTo(this.map);
+                }
+            });
+        },
+
+        async loadData() {
+            this.loading = true;
+            this.error = null;
+            try {
+                const params = MT.filterParams(this.filters);
+                this.data = await MT.fetchApi('/segments', params);
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                } else {
+                    this.$nextTick(() => {
+                        if (!this.map && document.getElementById('segments-map')) {
+                            this.map = MT.createMap('segments-map');
+                            this.layerGroup = L.layerGroup().addTo(this.map);
+                        }
+                        this.render();
+                    });
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+
+        render() {
+            if (!this.map || !this.data) return;
+            this.layerGroup.clearLayers();
+
+            if (this.viewMode === 'segments') {
+                this.renderSegments();
+            } else {
+                this.renderStations();
+            }
+        },
+
+        renderSegments() {
+            const segs = this.data.segments;
+            if (!segs.length) return;
+            const maxFreq = Math.max(...segs.map(s => s.freq));
+
+            for (const seg of segs) {
+                const ratio = seg.freq / maxFreq;
+                const color = MT.valueToColor(ratio);
+                L.polyline(seg.coords, {
+                    color,
+                    weight: 2 + ratio * 4,
+                    opacity: 0.8,
+                }).bindTooltip(`${seg.freq} trains/day`, { sticky: true })
+                  .addTo(this.layerGroup);
+            }
+
+            // Add station dots
+            for (const s of this.data.stations) {
+                L.circleMarker([s.lat, s.lon], {
+                    radius: 3,
+                    color: '#084594',
+                    fillColor: '#084594',
+                    fillOpacity: 0.6,
+                    weight: 1,
+                }).bindTooltip(`<b>${s.name}</b><br>${s.freq} trains/day`)
+                  .addTo(this.layerGroup);
+            }
+        },
+
+        renderStations() {
+            const stations = this.data.stations;
+            if (!stations.length) return;
+            const maxFreq = stations[0].freq;
+
+            for (const s of stations) {
+                const ratio = s.freq / maxFreq;
+                const radius = 4 + ratio * 12;
+                L.circleMarker([s.lat, s.lon], {
+                    radius,
+                    color: MT.valueToColor(ratio),
+                    fillColor: MT.valueToColor(ratio),
+                    fillOpacity: 0.7,
+                    weight: 1,
+                }).bindTooltip(`<b>${s.name}</b><br>${s.freq} trains/day`)
+                  .addTo(this.layerGroup);
+            }
+        },
+    };
+}
+</script>
+{% endblock %}

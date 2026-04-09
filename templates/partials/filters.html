@@ -1,0 +1,60 @@
+{# Shared date range and day-of-week filters. Include inside x-data scope. #}
+
+<div>
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Date Range</p>
+    <div class="grid grid-cols-2 gap-2">
+        <div>
+            <label class="text-[10px] text-gray-500">From</label>
+            <input type="date" x-model="filters.startDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white focus:ring-1 focus:ring-brand-400 focus:border-brand-400 outline-none">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">To</label>
+            <input type="date" x-model="filters.endDate"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white focus:ring-1 focus:ring-brand-400 focus:border-brand-400 outline-none">
+        </div>
+    </div>
+</div>
+
+<div class="border-t border-brand-200 pt-3">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Days of Week</p>
+    <div class="flex gap-1">
+        <template x-for="(day, i) in ['Mo','Tu','We','Th','Fr','Sa','Su']" :key="i">
+            <button
+                @click="toggleWeekday(i)"
+                :class="filters.weekdays.includes(i)
+                    ? 'bg-brand-500 text-white'
+                    : 'bg-white text-gray-500 border border-brand-200'"
+                class="w-8 h-8 rounded-md text-[10px] font-medium transition-colors"
+                x-text="day"
+            ></button>
+        </template>
+    </div>
+</div>
+
+<div class="border-t border-brand-200 pt-3">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Holidays</p>
+    <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+        <input type="checkbox" x-model="filters.excludePub" class="rounded border-brand-200 text-brand-500 focus:ring-brand-400">
+        Exclude public holidays
+    </label>
+    <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer mt-1.5">
+        <input type="checkbox" x-model="filters.excludeSch" class="rounded border-brand-200 text-brand-500 focus:ring-brand-400">
+        Exclude school holidays
+    </label>
+</div>
+
+<div class="border-t border-brand-200 pt-3">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Time of Day</p>
+    <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer mb-2">
+        <input type="checkbox" x-model="filters.useHour" class="rounded border-brand-200 text-brand-500 focus:ring-brand-400">
+        Filter by hour
+    </label>
+    <div x-show="filters.useHour" x-cloak class="flex items-center gap-2">
+        <input type="number" x-model.number="filters.hourStart" min="0" max="24"
+               class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        <span class="text-xs text-gray-400">to</span>
+        <input type="number" x-model.number="filters.hourEnd" min="0" max="24"
+               class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+    </div>
+</div>

@@ -2,10 +2,16 @@
 
 import os
 import json
-import streamlit as st
+from functools import lru_cache
 from collections import defaultdict
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
+
+try:
+    import streamlit as st
+    _HAS_STREAMLIT = True
+except ImportError:
+    _HAS_STREAMLIT = False
 
 from .api import fetch_gtfs, fetch_infrabel_segments, fetch_operational_points
 from .holidays import (
@@ -24,11 +30,7 @@ TOKEN = os.getenv("BRUSSELS_MOBILITY_TWIN_KEY", "")
 
 
 def noon_timestamp(year: int, month: int, day: int = 1) -> int:
-    """Return a Unix timestamp for noon (12:00) on the given date.
-
-    Using noon instead of midnight avoids timezone edge cases
-    when the API interprets the timestamp in CET/CEST.
-    """
+    """Return a Unix timestamp for noon (12:00) on the given date."""
     return int(datetime(year, month, day, 12, 0).timestamp())
 
 
@@ -85,22 +87,28 @@ CUSTOM_CSS = """
 
 
 def render_footer():
-    """Render the standard page footer."""
-    st.markdown(
-        '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
-        unsafe_allow_html=True,
-    )
+    """Render the standard page footer (Streamlit only)."""
+    if _HAS_STREAMLIT:
+        st.markdown(
+            '<div class="footer-credit">Powered by <strong>MobilityTwin.Brussels</strong> (ULB)</div>',
+            unsafe_allow_html=True,
+        )
 
 
-@st.cache_data(ttl=86400)
+@lru_cache(maxsize=1)
 def load_provinces_geojson():
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "provinces.geojson")
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "old", "provinces.geojson")
+    if not os.path.exists(path):
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "provinces.geojson")
     with open(path) as f:
         return json.load(f)
 
 
 def render_sidebar_filters():
-    """Render shared sidebar filters and return the computed state dict."""
+    """Render shared sidebar filters and return the computed state dict (Streamlit only)."""
+    if not _HAS_STREAMLIT:
+        raise RuntimeError("render_sidebar_filters requires Streamlit")
+
     day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     with st.sidebar:
@@ -226,7 +234,10 @@ def _month_ranges(start_date: date, end_date: date) -> list[tuple[int, date, dat
 
 
 def load_all_data(filters: dict):
-    """Fetch and process all shared data with progress indication."""
+    """Fetch and process all shared data with progress indication (Streamlit only)."""
+    if not _HAS_STREAMLIT:
+        return _load_all_data_inner(filters)
+
     cache_key = (
         filters["token"],
         tuple(filters["all_dates"]),
@@ -256,8 +267,10 @@ def _load_all_data_inner(filters: dict):
 
     gtfs = _accumulate_gtfs(active_months, all_dates, filters, token)
     if not gtfs["service_ids"]:
-        st.error("No active services found across any month.")
-        st.stop()
+        if _HAS_STREAMLIT:
+            st.error("No active services found across any month.")
+            st.stop()
+        return None
 
     for sid in gtfs["departures"]:
         gtfs["departures"][sid].sort(key=lambda x: x[0])
@@ -304,11 +317,14 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
     n_feeds = 0
 
     n_months = len(active_months)
-    progress = st.progress(0, text="Loading GTFS data...")
+    progress = None
+    if _HAS_STREAMLIT:
+        progress = st.progress(0, text="Loading GTFS data...")
 
     for i, (ts, month_start, month_end) in enumerate(active_months):
         month_label = month_start.strftime("%b %Y")
-        progress.progress(i / max(n_months, 1), text=f"Processing {month_label} ({i+1}/{n_months})...")
+        if progress:
+            progress.progress(i / max(n_months, 1), text=f"Processing {month_label} ({i+1}/{n_months})...")
 
         month_dates = [d for d in all_dates if month_start <= d <= month_end]
         if not month_dates:
@@ -317,11 +333,13 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
         try:
             feed = fetch_gtfs(ts, token)
         except Exception as e:
-            st.error(f"Failed to fetch GTFS for {month_label}: {e}")
+            if _HAS_STREAMLIT:
+                st.error(f"Failed to fetch GTFS for {month_label}: {e}")
             continue
 
         if feed.stop_times is None or feed.trips is None:
-            st.warning(f"GTFS data incomplete for {month_label}, skipping.")
+            if _HAS_STREAMLIT:
+                st.warning(f"GTFS data incomplete for {month_label}, skipping.")
             continue
 
         sdc = get_service_day_counts(feed, month_dates)
@@ -347,8 +365,9 @@ def _accumulate_gtfs(active_months, all_dates, filters, token):
 
         del feed
 
-    progress.progress(1.0, text="Finalizing...")
-    progress.empty()
+    if progress:
+        progress.progress(1.0, text="Finalizing...")
+        progress.empty()
 
     return {
         "seg_freqs": seg_freqs,

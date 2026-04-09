@@ -9,11 +9,14 @@ mile.
 import bisect
 import heapq
 import numpy as np
-import pandas as pd
 from collections import defaultdict
 from datetime import date
 
-from .gtfs import _to_datetime_safe
+from gtfs_parquet.ops.graph import (
+    build_stop_lookup as _lib_build_stop_lookup,
+    build_timetable_graph as _lib_build_timetable_graph,
+    get_service_day_counts as _lib_get_service_day_counts,
+)
 
 from .geo import haversine_km, is_in_belgium
 
@@ -43,27 +46,19 @@ def build_multimodal_stop_lookup(feeds: dict) -> dict[str, dict]:
     """
     lookup = {}
     for operator, feed in feeds.items():
-        if feed.stops is None:
-            continue
-        stops = feed.stops
-        lats = stops["stop_lat"].values.astype(float)
-        lons = stops["stop_lon"].values.astype(float)
-        sids = stops["stop_id"].astype(str).str.strip().values
-        if "parent_station" in stops.columns:
-            parents = stops["parent_station"].fillna("").astype(str).str.strip().values
-        else:
-            parents = np.full(len(stops), "", dtype=object)
-        names = stops["stop_name"].fillna("").values
-
-        for i in range(len(stops)):
-            lat, lon = lats[i], lons[i]
-            if np.isnan(lat) or np.isnan(lon) or not is_in_belgium(lat, lon):
+        raw = _lib_build_stop_lookup(feed, parent_stations=True)
+        prefix = f"{operator}:"
+        for sid, info in raw.items():
+            lat = info.get("stop_lat")
+            lon = info.get("stop_lon")
+            if lat is None or lon is None or not is_in_belgium(lat, lon):
                 continue
-            key = parents[i] if parents[i] else sids[i]
-            prefixed = f"{operator}:{key}"
+            prefixed = f"{prefix}{sid}"
             if prefixed not in lookup:
                 lookup[prefixed] = {
-                    "name": names[i], "lat": float(lat), "lon": float(lon),
+                    "name": info.get("stop_name", ""),
+                    "lat": float(lat),
+                    "lon": float(lon),
                     "operator": operator,
                 }
     return lookup
@@ -73,65 +68,9 @@ def build_multimodal_stop_lookup(feeds: dict) -> dict[str, dict]:
 # Multi-operator timetable graph
 # ---------------------------------------------------------------------------
 
-def _vectorized_time_to_minutes(series: pd.Series) -> np.ndarray:
-    if pd.api.types.is_timedelta64_dtype(series):
-        return (series.dt.total_seconds() / 60).fillna(-1).astype(int).values
-    parts = series.astype(str).str.split(":", n=2, expand=True)
-    hours = pd.to_numeric(parts[0], errors="coerce").fillna(-1)
-    minutes = pd.to_numeric(parts[1], errors="coerce").fillna(0)
-    return (hours * 60 + minutes).astype(int).values
-
-
-def _build_stop_to_station(stops: pd.DataFrame) -> dict[str, str]:
-    sid = stops["stop_id"].astype(str).str.strip()
-    if "parent_station" in stops.columns:
-        parent = stops["parent_station"].fillna("").astype(str).str.strip()
-    else:
-        parent = pd.Series("", index=stops.index)
-    station = np.where(parent != "", parent, sid)
-    return dict(zip(sid, station))
-
-
-def _is_pass_through(st_df: pd.DataFrame) -> pd.Series:
-    pickup = pd.to_numeric(
-        st_df["pickup_type"], errors="coerce"
-    ).fillna(0).astype(int) if "pickup_type" in st_df.columns else 0
-    dropoff = pd.to_numeric(
-        st_df["drop_off_type"], errors="coerce"
-    ).fillna(0).astype(int) if "drop_off_type" in st_df.columns else 0
-    return (pickup == 1) & (dropoff == 1)
-
-
 def get_active_service_ids(feed, target_dates: list[date]) -> set[str]:
     """Determine active service_ids for the given dates."""
-    day_names = ["monday", "tuesday", "wednesday", "thursday", "friday",
-                 "saturday", "sunday"]
-    counts: dict[str, int] = defaultdict(int)
-    ts_dates = {pd.Timestamp(d) for d in target_dates}
-
-    if feed.calendar is not None:
-        cal = feed.calendar.copy()
-        cal["start_date"] = _to_datetime_safe(cal["start_date"])
-        cal["end_date"] = _to_datetime_safe(cal["end_date"])
-        for d in target_dates:
-            ts = pd.Timestamp(d)
-            mask = (cal["start_date"] <= ts) & (cal["end_date"] >= ts)
-            day_col = day_names[d.weekday()]
-            if day_col in cal.columns:
-                for sid in cal.loc[mask & (cal[day_col] == 1), "service_id"]:
-                    counts[sid] += 1
-
-    if feed.calendar_dates is not None:
-        cd = feed.calendar_dates.copy()
-        cd["date"] = _to_datetime_safe(cd["date"])
-        cd = cd[cd["date"].isin(ts_dates)]
-        for sid in cd[cd["exception_type"] == 1]["service_id"]:
-            counts[sid] += 1
-        for sid in cd[cd["exception_type"] == 2]["service_id"]:
-            counts[sid] -= 1
-        counts = {k: v for k, v in counts.items() if v > 0}
-
-    return set(counts.keys())
+    return set(_lib_get_service_day_counts(feed, target_dates).keys())
 
 
 def build_multimodal_graph(feeds: dict,
@@ -141,7 +80,7 @@ def build_multimodal_graph(feeds: dict,
     """Build a unified timetable graph from multiple GTFS feeds.
 
     Station IDs are prefixed: "SNCB:stop_id", "STIB:stop_id", etc.
-    Returns station_departures dict.
+    Returns station_departures dict with tuples (dep_min, next_station, arr_min, trip_id).
     """
     all_departures: dict[str, list] = defaultdict(list)
 
@@ -150,56 +89,16 @@ def build_multimodal_graph(feeds: dict,
         if not sids:
             continue
 
-        trips = feed.trips
-        stop_times = feed.stop_times
-        stops = feed.stops
+        # Library returns {stop_id: [(next_stop_id, dep_min, arr_min, trip_id), ...]}
+        lib_graph = _lib_build_timetable_graph(feed, list(sids), hour_filter)
 
-        if stop_times is None or trips is None or stops is None:
-            continue
-
-        stop_to_station = _build_stop_to_station(stops)
-
-        active_trip_ids = set(
-            trips.loc[trips["service_id"].isin(sids), "trip_id"]
-        )
-        st_f = stop_times[stop_times["trip_id"].isin(active_trip_ids)].copy()
-        st_f = st_f.sort_values(["trip_id", "stop_sequence"])
-
-        st_f = st_f[~_is_pass_through(st_f)]
-
-        st_f["dep_min"] = _vectorized_time_to_minutes(st_f["departure_time"])
-        st_f["arr_min"] = _vectorized_time_to_minutes(st_f["arrival_time"])
-        st_f["station_id"] = st_f["stop_id"].map(stop_to_station).fillna(
-            st_f["stop_id"])
-
-        st_f["next_station"] = st_f.groupby("trip_id")["station_id"].shift(-1)
-        st_f["next_arr_min"] = st_f.groupby("trip_id")["arr_min"].shift(-1)
-
-        pairs = st_f.dropna(subset=["next_station"])
-        pairs = pairs[
-            (pairs["station_id"] != pairs["next_station"]) &
-            (pairs["dep_min"] >= 0)
-        ]
-
-        if hour_filter:
-            h_start, h_end = hour_filter
-            pairs = pairs[
-                (pairs["dep_min"] >= h_start * 60) &
-                (pairs["dep_min"] < h_end * 60)
-            ]
-
-        # Prefix station IDs with operator — fully vectorized
         prefix = f"{operator}:"
-        from_ids = (prefix + pairs["station_id"].astype(str)).values
-        to_ids = (prefix + pairs["next_station"].astype(str)).values
-        trip_ids = (prefix + pairs["trip_id"].astype(str)).values
-        dep_vals = pairs["dep_min"].values.astype(int)
-        arr_vals = pairs["next_arr_min"].values.astype(int)
-
-        for k in range(len(from_ids)):
-            all_departures[from_ids[k]].append((
-                dep_vals[k], to_ids[k], arr_vals[k], trip_ids[k],
-            ))
+        for from_sid, edges in lib_graph.items():
+            prefixed_from = f"{prefix}{from_sid}"
+            for next_sid, dep_min, arr_min, trip_id in edges:
+                all_departures[prefixed_from].append((
+                    dep_min, f"{prefix}{next_sid}", arr_min, f"{prefix}{trip_id}",
+                ))
 
     # Sort by departure time
     for sid in all_departures:
@@ -218,8 +117,6 @@ def build_transfer_edges(stop_lookup: dict[str, dict],
     """Build walking transfer edges between nearby stops.
 
     Returns: dict stop_id -> [(other_stop_id, walk_minutes), ...]
-    Connects stops within max_walk_km, both inter- and intra-operator
-    (different station IDs only).
     """
     ids = list(stop_lookup.keys())
     coords = np.array([(stop_lookup[s]["lat"], stop_lookup[s]["lon"]) for s in ids])
@@ -227,7 +124,6 @@ def build_transfer_edges(stop_lookup: dict[str, dict],
     transfers: dict[str, list[tuple[str, float]]] = defaultdict(list)
 
     # Use spatial binning for efficiency (avoid O(n²))
-    # Bin by 0.01° (~1.1km lat, ~0.7km lon)
     bins: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i in range(len(ids)):
         bx = int(coords[i, 0] / 0.01)
@@ -235,7 +131,6 @@ def build_transfer_edges(stop_lookup: dict[str, dict],
         bins[(bx, by)].append(i)
 
     for (bx, by), indices_in_bin in bins.items():
-        # Check this bin + 8 neighbours
         neighbours = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -245,8 +140,6 @@ def build_transfer_edges(stop_lookup: dict[str, dict],
             for j in neighbours:
                 if i >= j:
                     continue
-                # Skip self-links (same prefixed ID is impossible, but same
-                # underlying station within one operator is redundant)
                 if ids[i] == ids[j]:
                     continue
                 dist = haversine_km(
@@ -287,24 +180,16 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
                    transfer_penalty_min: int = 3,
                    max_walk_km: float = MAX_WALK_KM,
                    ) -> dict[str, dict]:
-    """Door-to-door Dijkstra from a geographic point.
-
-    Tries departures every 5 minutes within the window, keeps the best
-    travel time to each stop across all departure times.
-
-    Returns: stop_id -> {travel_time, transfers, walk_time, transit_time}
-    """
+    """Door-to-door Dijkstra from a geographic point."""
     nearby = find_nearby_stops(origin_lat, origin_lon, stop_lookup, max_walk_km)
     if not nearby:
         return {}
 
-    # Precompute departure time lists for bisect
     dep_times = {sid: [d[0] for d in deps]
                  for sid, deps in station_departures.items()}
 
     best_results: dict[str, dict] = {}
 
-    # Try every 5 minutes in the departure window
     start_min = departure_window[0] * 60
     end_min = departure_window[1] * 60
     for base_time in range(start_min, end_min, 5):
@@ -313,7 +198,6 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
         best_arrival: dict[str, float] = {}
         queue: list = []
 
-        # Seed: walk from origin to nearby stops
         for stop_id, walk_min in nearby:
             arrive_at = base_time + walk_min
             if arrive_at > deadline:
@@ -333,7 +217,6 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
             if max_transfers is not None and n_transfers > max_transfers:
                 continue
 
-            # Record result
             total_travel = current_time - base_time
             if current_stop not in best_results or \
                total_travel < best_results[current_stop]["travel_time"]:
@@ -344,7 +227,6 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
                     "transit_time": total_travel - walk_accum,
                 }
 
-            # Explore transit departures
             departures = station_departures.get(current_stop, [])
             dtimes = dep_times.get(current_stop, [])
             lo = bisect.bisect_left(dtimes, current_time)
@@ -384,7 +266,6 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
                         arr_min, next_stop, new_transfers, trip_id, walk_accum,
                     ))
 
-            # Explore walking transfers
             for other_stop, walk_min in transfer_edges.get(current_stop, []):
                 arr_walk = current_time + walk_min
                 if arr_walk > deadline:
@@ -401,19 +282,12 @@ def bfs_from_point(origin_lat: float, origin_lon: float,
 
 def _build_reverse_graph(station_departures: dict[str, list],
                          ) -> dict[str, list]:
-    """Build a reverse timetable graph for backward Dijkstra.
-
-    Original: from_stop -> [(dep_min, to_stop, arr_min, trip_id), ...]
-    Reverse:  to_stop   -> [(arr_min, from_stop, dep_min, trip_id), ...]
-
-    Sorted by arr_min descending (latest first) for backward search.
-    """
+    """Build a reverse timetable graph for backward Dijkstra."""
     reverse: dict[str, list] = defaultdict(list)
     for from_stop, deps in station_departures.items():
         for dep_min, to_stop, arr_min, trip_id in deps:
             reverse[to_stop].append((arr_min, from_stop, dep_min, trip_id))
 
-    # Sort by arrival time descending (we search backward in time)
     for sid in reverse:
         reverse[sid].sort(key=lambda x: x[0], reverse=True)
 
@@ -430,47 +304,29 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                  transfer_penalty_min: int = 3,
                  max_walk_km: float = MAX_WALK_KM,
                  ) -> dict[str, dict]:
-    """Door-to-door reverse Dijkstra *to* a destination point.
-
-    Runs backward from the destination: starts at stops near the destination,
-    then follows the timetable graph in reverse (arrivals → departures) to
-    find the latest possible departure from each origin stop that still
-    arrives in time.
-
-    Returns: stop_id -> {travel_time, transfers, walk_time, transit_time}
-    """
+    """Door-to-door reverse Dijkstra *to* a destination point."""
     nearby_dest = find_nearby_stops(dest_lat, dest_lon, stop_lookup, max_walk_km)
     if not nearby_dest:
         return {}
 
     reverse_graph = _build_reverse_graph(station_departures)
 
-    # Precompute arrival time lists for bisect (descending order)
     arr_times = {sid: [e[0] for e in edges]
                  for sid, edges in reverse_graph.items()}
 
     best_results: dict[str, dict] = {}
 
-    # Try target arrival times every 5 minutes in the window
     start_min = departure_window[0] * 60
     end_min = departure_window[1] * 60
 
     for target_arrival in range(start_min, end_min, 5):
-        # The traveller must arrive at destination by target_arrival + max_minutes
         deadline_arrival = target_arrival + max_minutes
-        # Earliest departure we consider
         earliest_dep = target_arrival
 
-        # latest_departure[stop] = latest time you can depart from stop and
-        # still reach the destination by deadline_arrival
         latest_departure: dict[str, float] = {}
-
-        # Max-heap (negate time): (-departure_time, stop_id, n_transfers, trip_id, walk_accum)
         queue: list = []
 
-        # Seed: walk from destination-nearby stops to destination
         for stop_id, walk_min in nearby_dest:
-            # You need to arrive at this stop by deadline_arrival - walk_min
             depart_by = deadline_arrival - walk_min
             if depart_by < earliest_dep:
                 continue
@@ -481,7 +337,7 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
         while queue:
             neg_time, current_stop, n_transfers, current_trip, walk_accum = \
                 heapq.heappop(queue)
-            current_time = -neg_time  # latest time to depart from current_stop
+            current_time = -neg_time
 
             if current_time < latest_departure.get(current_stop, -1):
                 continue
@@ -490,7 +346,6 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
             if max_transfers is not None and n_transfers > max_transfers:
                 continue
 
-            # Record result: travel_time = deadline_arrival - current_time
             total_travel = deadline_arrival - current_time
             if total_travel > max_minutes:
                 continue
@@ -503,14 +358,9 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                     "transit_time": total_travel - walk_accum,
                 }
 
-            # Explore reverse transit: find arrivals at current_stop where
-            # arr_min <= current_time (i.e. the train arrived before we need
-            # to be here). Then we can "go back" to the departure stop.
             arrivals = reverse_graph.get(current_stop, [])
             atimes = arr_times.get(current_stop, [])
 
-            # atimes is sorted descending; find first index where arr <= current_time
-            # binary search: we want largest arr_min <= current_time
             lo = bisect.bisect_left(atimes, -current_time, key=lambda x: -x)
 
             seen_prev = set()
@@ -529,7 +379,6 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                 else:
                     is_initial = current_trip is None
                     if not is_initial:
-                        # Transfer: arrival must be at least penalty before current
                         if arr_min + transfer_penalty_min > current_time:
                             continue
                         new_transfers = n_transfers + 1
@@ -543,14 +392,12 @@ def bfs_to_point(dest_lat: float, dest_lon: float,
                         continue
                     seen_prev.add(from_stop)
 
-                # dep_min = the time you'd need to be at from_stop
                 if dep_min > latest_departure.get(from_stop, -1):
                     latest_departure[from_stop] = dep_min
                     heapq.heappush(queue, (
                         -dep_min, from_stop, new_transfers, trip_id, walk_accum,
                     ))
 
-            # Explore walking transfers (backward)
             for other_stop, walk_min in transfer_edges.get(current_stop, []):
                 depart_by = current_time - walk_min
                 if depart_by < earliest_dep:
@@ -578,16 +425,7 @@ def bfs_from_stops(source_stop_ids: set[str],
                    max_transfers: int = 3,
                    transfer_penalty_min: int = 3,
                    ) -> dict[str, dict]:
-    """Multi-source Dijkstra: all *source_stop_ids* start at time 0.
-
-    Propagates outward through the timetable graph to find the minimum
-    travel time from any source to every reachable stop.  This is
-    equivalent to running ``bfs_from_point`` from every source
-    simultaneously, but executes in a single pass.
-
-    Returns: stop_id -> {travel_time, transfers}
-    """
-    # Precompute departure time lists for bisect
+    """Multi-source Dijkstra: all *source_stop_ids* start at time 0."""
     dep_times = {sid: [d[0] for d in deps]
                  for sid, deps in station_departures.items()}
 
@@ -602,7 +440,6 @@ def bfs_from_stops(source_stop_ids: set[str],
         best_arrival: dict[str, float] = {}
         queue: list = []
 
-        # Seed: all source stops at base_time (0 travel time)
         for sid in source_stop_ids:
             if sid not in stop_lookup:
                 continue
@@ -628,7 +465,6 @@ def bfs_from_stops(source_stop_ids: set[str],
                     "transfers": n_transfers,
                 }
 
-            # Explore transit departures
             departures = station_departures.get(current_stop, [])
             dtimes = dep_times.get(current_stop, [])
             lo = bisect.bisect_left(dtimes, current_time)
@@ -668,7 +504,6 @@ def bfs_from_stops(source_stop_ids: set[str],
                         arr_min, next_stop, new_transfers, trip_id,
                     ))
 
-            # Explore walking transfers
             for other_stop, walk_min in transfer_edges.get(current_stop, []):
                 arr_walk = current_time + walk_min
                 if arr_walk > deadline:

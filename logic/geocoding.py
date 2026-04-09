@@ -1,13 +1,13 @@
 """Geocoding via OpenStreetMap Nominatim (no API key needed)."""
 
 import requests
-import streamlit as st
+from functools import lru_cache
 
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _USER_AGENT = "MobilityTwinExplorer/1.0 (ULB research)"
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@lru_cache(maxsize=256)
 def geocode_address(address: str) -> dict | None:
     """Geocode an address string to {lat, lon, display_name}.
 
@@ -43,7 +43,7 @@ def geocode_address(address: str) -> dict | None:
     }
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@lru_cache(maxsize=256)
 def geocode_suggestions(query: str, limit: int = 5) -> list[dict]:
     """Return up to *limit* geocoding suggestions for autocomplete."""
     if not query or len(query) < 3:

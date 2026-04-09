@@ -1,0 +1,230 @@
+import { createRoute } from "@tanstack/react-router";
+import { useState, useMemo, useRef, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { MapPin } from "lucide-react";
+import type { Layer } from "@deck.gl/core";
+import { rootRoute } from "./__root";
+import { Layout } from "@/components/Layout";
+import { FilterPanel, type Filters } from "@/components/FilterPanel";
+import { MetricCard } from "@/components/MetricCard";
+import { LoadingState } from "@/components/LoadingState";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorAlert } from "@/components/ErrorAlert";
+import { ApplyButton } from "@/components/ApplyButton";
+import { DataTable } from "@/components/DataTable";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectOption } from "@/components/ui/select";
+import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
+import { fetchApi } from "@/lib/api";
+import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
+import { stationLayer, colorToRGBA } from "@/lib/layers";
+
+export const reachRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/reach",
+  component: ReachPage,
+});
+
+interface ReachStation {
+  id: string; name: string; lat: number; lon: number; reachable: number;
+  destinations?: { name: string; lat: number; lon: number; time: number }[];
+}
+interface ReachData {
+  stations: ReachStation[]; max_reachable: number; avg_reachable: number; median_reachable: number; error?: string;
+}
+
+function ReachPage() {
+  const [filters, setFilters] = useState<Filters>({
+    startDate: daysAgo(7), endDate: today(), weekdays: [0, 1, 2, 3, 4],
+    excludePub: false, excludeSch: false, useHour: false, hourStart: 7, hourEnd: 19,
+  });
+  const [timeBudget, setTimeBudget] = useState(1.5);
+  const [depStart, setDepStart] = useState(7);
+  const [depEnd, setDepEnd] = useState(9);
+  const [maxTransfers, setMaxTransfers] = useState(3);
+  const [minTransferTime, setMinTransferTime] = useState(5);
+  const [selectedStation, setSelectedStation] = useState("");
+  const [viewMode, setViewMode] = useState("stations");
+  const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
+  const mapRef = useRef<DeckMapRef>(null);
+
+  const { data, error, isFetching } = useQuery({
+    queryKey: ["reach", queryParams],
+    queryFn: () => fetchApi<ReachData>("/reach", queryParams!),
+    enabled: !!queryParams,
+  });
+
+  const loadData = () => setQueryParams({
+    ...filterParams(filters), time_budget: timeBudget, dep_start: depStart,
+    dep_end: depEnd, max_transfers: maxTransfers, min_transfer_time: minTransferTime,
+  });
+
+  const handleSelectStation = useCallback((stationId: string) => {
+    setSelectedStation(stationId);
+    if (stationId && data) {
+      const s = data.stations.find((x) => x.id === stationId);
+      if (s) {
+        mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 9 });
+      }
+    }
+  }, [data]);
+
+  const layers = useMemo<Layer[]>(() => {
+    if (!data || data.error) return [];
+    if (viewMode !== "stations") return [];
+
+    const stations = data.stations;
+    if (!stations.length) return [];
+    const maxReach = Math.max(...stations.map((s) => s.reachable));
+
+    const result: Layer[] = [];
+
+    // Base station layer
+    result.push(
+      stationLayer("reach-stations", stations, {
+        positionFn: (d) => [d.lon, d.lat],
+        radiusFn: (d) => 4 + (d.reachable / Math.max(maxReach, 1)) * 12,
+        colorFn: (d) => colorToRGBA(1 - d.reachable / Math.max(maxReach, 1)),
+        radiusMinPixels: 3,
+        radiusMaxPixels: 30,
+        pickable: true,
+      }) as Layer,
+    );
+
+    if (selectedStation) {
+      const s = stations.find((x) => x.id === selectedStation);
+      if (s) {
+        // Highlight selected station in red
+        result.push(
+          stationLayer("reach-selected", [s], {
+            positionFn: (d) => [d.lon, d.lat],
+            radiusFn: () => 10,
+            colorFn: () => [227, 26, 28, 230],
+            radiusMinPixels: 8,
+            radiusMaxPixels: 16,
+            pickable: false,
+          }) as Layer,
+        );
+
+        // Destination stations
+        if (s.destinations && s.destinations.length) {
+          result.push(
+            stationLayer("reach-destinations", s.destinations, {
+              positionFn: (d) => [d.lon, d.lat],
+              radiusFn: () => 5,
+              colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60)),
+              radiusMinPixels: 4,
+              radiusMaxPixels: 12,
+              pickable: true,
+            }) as Layer,
+          );
+        }
+      }
+    }
+
+    return result;
+  }, [data, viewMode, selectedStation, timeBudget]);
+
+  return (
+    <Layout
+      sidebar={
+        <>
+          <div className="space-y-2">
+            <Label>Reach Settings</Label>
+            <div>
+              <Label className="text-[10px] text-muted-foreground">Time budget (hours)</Label>
+              <Input type="number" value={timeBudget} min={0.5} max={6} step={0.5} onChange={(e) => setTimeBudget(+e.target.value)} className="h-8 text-xs" />
+            </div>
+            <div>
+              <Label className="text-[10px] text-muted-foreground">Departure window</Label>
+              <div className="flex items-center gap-2">
+                <Input type="number" value={depStart} min={0} max={24} onChange={(e) => setDepStart(+e.target.value)} className="w-16 h-8 text-xs" />
+                <span className="text-xs text-muted-foreground">to</span>
+                <Input type="number" value={depEnd} min={0} max={24} onChange={(e) => setDepEnd(+e.target.value)} className="w-16 h-8 text-xs" />
+              </div>
+            </div>
+            <div>
+              <Label className="text-[10px] text-muted-foreground">Max transfers</Label>
+              <Input type="number" value={maxTransfers} min={0} max={5} onChange={(e) => setMaxTransfers(+e.target.value)} className="h-8 text-xs" />
+            </div>
+            <div>
+              <Label className="text-[10px] text-muted-foreground">Min transfer time (min)</Label>
+              <Input type="number" value={minTransferTime} min={0} max={15} onChange={(e) => setMinTransferTime(+e.target.value)} className="h-8 text-xs" />
+            </div>
+          </div>
+          <div className="border-t border-border pt-3 mt-3">
+            <FilterPanel filters={filters} onChange={setFilters} />
+          </div>
+          <ApplyButton loading={isFetching} onClick={loadData} label="Compute Reachability" loadingLabel="Computing..." />
+        </>
+      }
+    >
+      {data && !data.error && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <MetricCard label="Stations" value={fmt(data.stations.length)} />
+          <MetricCard label="Max Reachable" value={fmt(data.max_reachable)} />
+          <MetricCard label="Avg Reachable" value={fmt(data.avg_reachable, 1)} />
+          <MetricCard label="Median" value={fmt(data.median_reachable)} />
+        </div>
+      )}
+
+      {isFetching && <LoadingState message="Computing reachability (this may take a while)..." />}
+      {!isFetching && !data && <EmptyState icon={MapPin} message="Configure settings and click Compute" />}
+
+      {data && !data.error && !isFetching && (
+        <>
+          <Tabs value={viewMode} onValueChange={setViewMode} className="mb-4">
+            <TabsList>
+              <TabsTrigger value="stations">Stations</TabsTrigger>
+              <TabsTrigger value="provinces">Provinces</TabsTrigger>
+              <TabsTrigger value="regions">Regions</TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {viewMode === "stations" && (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+              <div className="xl:col-span-2">
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
+              </div>
+              <div>
+                <div className="mb-3">
+                  <Label className="text-[10px] text-muted-foreground block mb-1">Highlight station</Label>
+                  <Select value={selectedStation} onValueChange={handleSelectStation}>
+                    <SelectOption value="">All stations</SelectOption>
+                    {data.stations.map((s) => <SelectOption key={s.id} value={s.id}>{s.name} ({s.reachable})</SelectOption>)}
+                  </Select>
+                </div>
+                <DataTable
+                  title="Stations by Reachability"
+                  keyFn={(s) => s.id}
+                  data={data.stations}
+                  onRowClick={(s) => handleSelectStation(s.id)}
+                  columns={[
+                    { header: "Station", accessor: (s) => <span className="font-medium truncate max-w-[160px] block">{s.name}</span> },
+                    { header: "Reachable", accessor: (s) => <span className="font-semibold text-primary">{s.reachable}</span>, align: "right" },
+                  ]}
+                />
+              </div>
+            </div>
+          )}
+
+          {viewMode === "provinces" && (
+            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
+              View mode coming soon
+            </div>
+          )}
+
+          {viewMode === "regions" && (
+            <div className="flex items-center justify-center h-64 text-muted-foreground text-sm">
+              View mode coming soon
+            </div>
+          )}
+        </>
+      )}
+
+      {(error || data?.error) && <ErrorAlert message={data?.error ?? (error as Error).message} />}
+    </Layout>
+  );
+}

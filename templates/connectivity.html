@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% block title %}Station Connectivity — MobilityTwin{% endblock %}
+{% block nav_connectivity %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="connectivityPage()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Settings</p>
+    <div class="space-y-2">
+        <div>
+            <label class="text-[10px] text-gray-500">Time budget (hours)</label>
+            <input type="number" x-model.number="timeBudget" min="0.5" max="6" step="0.5"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Max transfers</label>
+            <input type="number" x-model.number="maxTransfers" min="0" max="5"
+                   class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+        </div>
+        <div>
+            <label class="text-[10px] text-gray-500">Departure window</label>
+            <div class="flex items-center gap-2">
+                <input type="number" x-model.number="depStart" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+                <span class="text-xs text-gray-400">to</span>
+                <input type="number" x-model.number="depEnd" min="0" max="24"
+                       class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none">
+            </div>
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Station Size</p>
+        <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+            <input type="checkbox" x-model="showSmall" class="rounded border-brand-200 text-brand-500">
+            Small (&lt;4 trains/h)
+        </label>
+        <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer mt-1">
+            <input type="checkbox" x-model="showMedium" class="rounded border-brand-200 text-brand-500">
+            Medium (4-10 trains/h)
+        </label>
+        <label class="flex items-center gap-2 text-xs text-gray-600 cursor-pointer mt-1">
+            <input type="checkbox" x-model="showBig" class="rounded border-brand-200 text-brand-500">
+            Big (&ge;10 trains/h)
+        </label>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        {% include "partials/filters.html" %}
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()" :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Compute</span>
+            <span x-show="loading" x-cloak>Computing...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="connectivityPage()">
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Computing connectivity metrics...</p>
+        </div>
+    </div>
+
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">📊</div>
+            <p class="text-sm text-gray-400">Configure settings and click Compute</p>
+        </div>
+    </div>
+
+    <div x-show="data && !loading" x-cloak>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Total Stations</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.total) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Small</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.n_small) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Medium</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.n_medium) : '—'"></div>
+            </div>
+            <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider">Big</div>
+                <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.n_big) : '—'"></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div id="connectivity-map" class="w-full h-96 rounded-xl border border-gray-200 shadow-sm"></div>
+            <div>
+                <canvas id="scatter-chart" class="w-full h-96"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function connectivityPage() {
+    return {
+        filters: MT.defaultFilters(),
+        timeBudget: 2.0,
+        maxTransfers: 2,
+        depStart: 7,
+        depEnd: 9,
+        showSmall: true,
+        showMedium: true,
+        showBig: true,
+        loading: false,
+        data: null,
+        error: null,
+        map: null,
+        layerGroup: null,
+        chart: null,
+
+        toggleWeekday(i) {
+            const idx = this.filters.weekdays.indexOf(i);
+            if (idx >= 0) this.filters.weekdays.splice(idx, 1);
+            else this.filters.weekdays.push(i);
+        },
+
+        async loadData() {
+            this.loading = true;
+            this.error = null;
+            try {
+                const params = {
+                    ...MT.filterParams(this.filters),
+                    time_budget: this.timeBudget,
+                    max_transfers: this.maxTransfers,
+                    dep_start: this.depStart,
+                    dep_end: this.depEnd,
+                };
+                this.data = await MT.fetchApi('/connectivity', params);
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                } else {
+                    this.$nextTick(() => {
+                        this.renderMap();
+                        this.renderChart();
+                    });
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+
+        renderMap() {
+            if (!document.getElementById('connectivity-map')) return;
+            if (!this.map) {
+                this.map = MT.createMap('connectivity-map');
+                this.layerGroup = L.layerGroup().addTo(this.map);
+            }
+            this.layerGroup.clearLayers();
+
+            const stations = this.filteredStations();
+            if (!stations.length) return;
+            const maxFreq = Math.max(...stations.map(s => s.direct_freq));
+
+            const sizeColors = { small: '#6baed6', medium: '#2171b5', big: '#084594' };
+            for (const s of stations) {
+                const radius = 3 + (s.direct_freq / Math.max(maxFreq, 1)) * 12;
+                L.circleMarker([s.lat, s.lon], {
+                    radius,
+                    color: sizeColors[s.size] || '#333',
+                    fillColor: sizeColors[s.size] || '#333',
+                    fillOpacity: 0.6,
+                    weight: 1,
+                }).bindTooltip(
+                    `<b>${s.name}</b><br>` +
+                    `A: ${s.reachable} | B: ${s.direct_freq.toFixed(1)}/h | C: ${s.reach_km.toFixed(0)} km`
+                ).addTo(this.layerGroup);
+            }
+        },
+
+        renderChart() {
+            const canvas = document.getElementById('scatter-chart');
+            if (!canvas) return;
+            if (this.chart) this.chart.destroy();
+
+            const stations = this.filteredStations();
+            const regionColors = { Brussels: '#e31a1c', Flanders: '#ff7f00', Wallonia: '#2171b5' };
+
+            this.chart = new Chart(canvas, {
+                type: 'scatter',
+                data: {
+                    datasets: Object.entries(regionColors).map(([region, color]) => ({
+                        label: region,
+                        data: stations.filter(s => s.region === region).map(s => ({
+                            x: s.reachable,
+                            y: s.direct_freq,
+                            r: Math.max(3, s.reach_km / 20),
+                            name: s.name,
+                        })),
+                        backgroundColor: color + '88',
+                        borderColor: color,
+                        pointRadius: (ctx) => ctx.raw?.r || 4,
+                    })),
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { title: { display: true, text: 'Reachable stations (A)' } },
+                        y: { title: { display: true, text: 'Direct freq/h (B)' } },
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => `${ctx.raw.name}: A=${ctx.raw.x}, B=${ctx.raw.y.toFixed(1)}`,
+                            },
+                        },
+                    },
+                },
+            });
+        },
+
+        filteredStations() {
+            if (!this.data) return [];
+            return this.data.stations.filter(s =>
+                (s.size === 'small' && this.showSmall) ||
+                (s.size === 'medium' && this.showMedium) ||
+                (s.size === 'big' && this.showBig)
+            );
+        },
+    };
+}
+</script>
+{% endblock %}

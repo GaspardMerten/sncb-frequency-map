@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}MobilityTwin — Home{% endblock %}
+
+{% block sidebar %}
+<div class="text-center py-8">
+    <div class="text-4xl mb-3">🚆</div>
+    <h2 class="text-brand-600 font-bold text-lg">SNCB Frequency Explorer</h2>
+    <p class="text-xs text-gray-500 mt-1">Belgian rail & transit analytics</p>
+</div>
+
+<div class="space-y-1">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Data Sources</p>
+    <div class="flex flex-wrap gap-1.5">
+        <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-medium">GTFS</span>
+        <span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-[10px] font-medium">Infrabel</span>
+        <span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded text-[10px] font-medium">MobilityTwin</span>
+    </div>
+</div>
+
+<div class="space-y-1 pt-2">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Pipeline</p>
+    <div class="space-y-1.5 text-[11px] text-gray-600">
+        <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0">1</span>
+            Fetch GTFS snapshots
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0">2</span>
+            Match to Infrabel segments
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0">3</span>
+            Compute frequencies & timetables
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0">4</span>
+            BFS reachability analysis
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0">5</span>
+            Interactive visualization
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-brand-600">Belgian Rail & Transit Analytics</h1>
+    <p class="text-sm text-gray-500 mt-1">Explore train frequencies, station reachability, travel times, and punctuality across Belgium.</p>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+    {% for page in pages %}
+    <a href="/{{ page.slug }}" class="group block bg-white rounded-xl border border-gray-200 p-5 hover:border-brand-300 hover:shadow-md transition-all duration-200">
+        <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-lg bg-brand-50 flex items-center justify-center text-brand-500 group-hover:bg-brand-100 transition-colors shrink-0">
+                <i class="icon-{{ page.icon }} w-5 h-5" data-lucide="{{ page.icon }}"></i>
+            </div>
+            <div>
+                <h3 class="font-semibold text-gray-800 group-hover:text-brand-600 transition-colors">{{ page.title }}</h3>
+                <p class="text-xs text-gray-500 mt-0.5">{{ page.desc }}</p>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

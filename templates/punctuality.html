@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% block title %}Train Punctuality — MobilityTwin{% endblock %}
+{% block nav_punctuality %}bg-brand-50 !text-brand-600 font-medium{% endblock %}
+
+{% block sidebar %}
+<div x-data="punctualityPage()" x-ref="sidebar">
+    <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Date</p>
+    <input type="date" x-model="targetDate"
+           class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white focus:ring-1 focus:ring-brand-400 outline-none">
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Delay Metric</p>
+        <div class="flex gap-1">
+            <button @click="metric = 'departure'"
+                :class="metric === 'departure' ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                class="flex-1 py-1.5 rounded-md text-xs font-medium transition-colors">Departure</button>
+            <button @click="metric = 'arrival'"
+                :class="metric === 'arrival' ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 border border-brand-200'"
+                class="flex-1 py-1.5 rounded-md text-xs font-medium transition-colors">Arrival</button>
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <p class="text-[11px] font-semibold text-brand-500 uppercase tracking-wider mb-2">Filters</p>
+        <div class="space-y-2">
+            <div>
+                <label class="text-[10px] text-gray-500">Hour window</label>
+                <div class="flex items-center gap-2">
+                    <input type="number" x-model.number="hourStart" min="0" max="24"
+                           class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+                    <span class="text-xs text-gray-400">to</span>
+                    <input type="number" x-model.number="hourEnd" min="0" max="24"
+                           class="w-16 text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+                </div>
+            </div>
+            <div>
+                <label class="text-[10px] text-gray-500">Min trains per station</label>
+                <input type="number" x-model.number="minTrains" min="1" max="100"
+                       class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+            </div>
+            <div>
+                <label class="text-[10px] text-gray-500">Delay cap (min)</label>
+                <input type="number" x-model.number="delayCap" min="1" max="120"
+                       class="w-full text-xs border border-brand-200 rounded-md px-2 py-1.5 bg-white outline-none focus:ring-1 focus:ring-brand-400">
+            </div>
+        </div>
+    </div>
+
+    <div class="border-t border-brand-200 pt-3 mt-3">
+        <button @click="loadData()" :disabled="loading"
+            class="w-full py-2 rounded-lg text-xs font-semibold text-white bg-brand-500 hover:bg-brand-600 disabled:opacity-50 transition-colors">
+            <span x-show="!loading">Analyse</span>
+            <span x-show="loading" x-cloak>Loading...</span>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="punctualityPage()">
+    <!-- Metrics -->
+    <div x-show="data" x-cloak class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Stations</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? MT.fmt(data.summary.n_stations) : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Avg Delay</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? data.summary.avg_delay + ' min' : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Median Delay</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? data.summary.median_delay + ' min' : '—'"></div>
+        </div>
+        <div class="bg-white border border-brand-200 rounded-lg px-4 py-3">
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">% Late (&gt;1min)</div>
+            <div class="text-xl font-bold text-brand-500" x-text="data ? data.summary.pct_late + '%' : '—'"></div>
+        </div>
+    </div>
+
+    <!-- Loading -->
+    <div x-show="loading" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="w-8 h-8 border-2 border-brand-200 border-t-brand-500 rounded-full animate-spin mx-auto mb-3"></div>
+            <p class="text-sm text-gray-500">Loading punctuality data...</p>
+        </div>
+    </div>
+
+    <!-- Empty state -->
+    <div x-show="!loading && !data" class="flex items-center justify-center h-96">
+        <div class="text-center">
+            <div class="text-4xl mb-3 opacity-30">⏰</div>
+            <p class="text-sm text-gray-400">Select a date and click Analyse</p>
+        </div>
+    </div>
+
+    <!-- Map + table layout -->
+    <div x-show="data && !loading" x-cloak class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div class="xl:col-span-2">
+            <div id="punctuality-map" class="w-full h-[calc(100vh-14rem)] rounded-xl border border-gray-200 shadow-sm"></div>
+        </div>
+        <div>
+            <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div class="px-4 py-3 border-b border-gray-100">
+                    <h3 class="text-sm font-semibold text-gray-700">Most Delayed Stations</h3>
+                </div>
+                <div class="max-h-[calc(100vh-18rem)] overflow-y-auto">
+                    <table class="w-full text-xs">
+                        <thead class="bg-gray-50 sticky top-0">
+                            <tr>
+                                <th class="px-3 py-2 text-left text-gray-500 font-medium">Station</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">Avg</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">Trains</th>
+                                <th class="px-3 py-2 text-right text-gray-500 font-medium">% Late</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="(s, i) in (data ? data.stations.slice(0, 30) : [])" :key="s.name">
+                                <tr class="border-t border-gray-50 hover:bg-brand-50/50 cursor-pointer" @click="flyTo(s)">
+                                    <td class="px-3 py-2 font-medium text-gray-700 truncate max-w-[140px]" x-text="s.name"></td>
+                                    <td class="px-3 py-2 text-right font-semibold" :class="s.avg_delay > 5 ? 'text-red-500' : 'text-brand-500'" x-text="s.avg_delay + 'm'"></td>
+                                    <td class="px-3 py-2 text-right text-gray-500" x-text="s.n_trains"></td>
+                                    <td class="px-3 py-2 text-right" :class="s.pct_late > 50 ? 'text-red-500' : 'text-gray-500'" x-text="s.pct_late + '%'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="error" x-cloak class="mt-4 bg-red-50 border border-red-200 rounded-lg p-4">
+        <p class="text-sm text-red-700" x-text="error"></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function punctualityPage() {
+    const d = new Date();
+    d.setDate(d.getDate() - 2);
+
+    return {
+        targetDate: d.toISOString().slice(0, 10),
+        metric: 'departure',
+        hourStart: 5,
+        hourEnd: 24,
+        minTrains: 5,
+        delayCap: 30,
+        loading: false,
+        data: null,
+        error: null,
+        map: null,
+        layerGroup: null,
+
+        async loadData() {
+            this.loading = true;
+            this.error = null;
+            try {
+                this.data = await MT.fetchApi('/punctuality', {
+                    target_date: this.targetDate,
+                    hour_start: this.hourStart,
+                    hour_end: this.hourEnd,
+                    min_trains: this.minTrains,
+                    delay_cap: this.delayCap,
+                    metric: this.metric,
+                });
+                if (this.data.error) {
+                    this.error = this.data.error;
+                    this.data = null;
+                } else {
+                    this.$nextTick(() => this.renderMap());
+                }
+            } catch (e) {
+                this.error = e.message;
+            }
+            this.loading = false;
+        },
+
+        renderMap() {
+            if (!document.getElementById('punctuality-map')) return;
+            if (!this.map) {
+                this.map = MT.createMap('punctuality-map');
+                this.layerGroup = L.layerGroup().addTo(this.map);
+            }
+            this.layerGroup.clearLayers();
+
+            const stations = this.data.stations;
+            if (!stations.length) return;
+            const maxDelay = Math.max(...stations.map(s => s.avg_delay));
+            const maxTrains = Math.max(...stations.map(s => s.n_trains));
+
+            for (const s of stations) {
+                const ratio = s.avg_delay / Math.max(maxDelay, 1);
+                const radius = 4 + (s.n_trains / maxTrains) * 14;
+                L.circleMarker([s.lat, s.lon], {
+                    radius,
+                    color: MT.valueToColor(ratio),
+                    fillColor: MT.valueToColor(ratio),
+                    fillOpacity: 0.7,
+                    weight: 1,
+                }).bindTooltip(
+                    `<b>${s.name}</b><br>` +
+                    `Avg: ${s.avg_delay} min | Trains: ${s.n_trains}<br>` +
+                    `Late: ${s.pct_late}%`
+                ).addTo(this.layerGroup);
+            }
+        },
+
+        flyTo(station) {
+            if (this.map) {
+                this.map.flyTo([station.lat, station.lon], 12, { duration: 0.5 });
+            }
+        },
+    };
+}
+</script>
+{% endblock %}

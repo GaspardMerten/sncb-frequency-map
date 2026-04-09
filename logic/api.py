@@ -1,13 +1,11 @@
 """API calls to the MobilityTwin Brussels platform."""
 
-import dataclasses
 import os
 import tempfile
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 import requests
-import streamlit as st
-from types import SimpleNamespace
 from gtfs_parquet import read_parquet
 
 API_BASE = "https://api.mobilitytwin.brussels"
@@ -18,28 +16,17 @@ _PUNCTUALITY_OFFSET_DAYS = 2
 
 
 def punctuality_ts(d) -> int:
-    """Return the API timestamp needed to fetch punctuality for date *d*.
-
-    The Infrabel punctuality endpoint returns data for the day that is
-    2 days before the timestamp, so we add 2 days and use noon.
-    """
+    """Return the API timestamp needed to fetch punctuality for date *d*."""
     target = d + timedelta(days=_PUNCTUALITY_OFFSET_DAYS)
     return int(datetime(target.year, target.month, target.day, 12, 0).timestamp())
 
 
-def _to_pandas_feed(pq_feed):
-    """Convert a gtfs-parquet Feed (Polars DataFrames) to a SimpleNamespace
-    with pandas DataFrames so the rest of the codebase can keep using pandas."""
-    ns = SimpleNamespace()
-    for field in dataclasses.fields(pq_feed):
-        val = getattr(pq_feed, field.name)
-        setattr(ns, field.name, val.to_pandas() if val is not None else None)
-    return ns
-
-
-@st.cache_resource(ttl=3600)
+@lru_cache(maxsize=8)
 def fetch_gtfs(timestamp: int, token: str):
-    """Download and parse the SNCB GTFS parquet for a given timestamp."""
+    """Download and parse the SNCB GTFS parquet for a given timestamp.
+
+    Returns a native gtfs_parquet.Feed (Polars DataFrames).
+    """
     r = requests.get(
         f"{API_BASE}/sncb/gtfs-parquet",
         params={"timestamp": timestamp},
@@ -51,13 +38,13 @@ def fetch_gtfs(timestamp: int, token: str):
     try:
         tmp.write(r.content)
         tmp.close()
-        feed = _to_pandas_feed(read_parquet(tmp.name))
+        feed = read_parquet(tmp.name)
     finally:
         os.unlink(tmp.name)
     return feed
 
 
-@st.cache_data(ttl=3600, show_spinner="Fetching rail segments...")
+@lru_cache(maxsize=8)
 def fetch_infrabel_segments(timestamp: int, token: str) -> dict:
     """Fetch Infrabel track segment GeoJSON."""
     r = requests.get(
@@ -70,7 +57,7 @@ def fetch_infrabel_segments(timestamp: int, token: str) -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=3600, show_spinner="Fetching stations...")
+@lru_cache(maxsize=8)
 def fetch_operational_points(timestamp: int, token: str) -> dict:
     """Fetch Infrabel operational points (stations) GeoJSON."""
     r = requests.get(
@@ -83,13 +70,9 @@ def fetch_operational_points(timestamp: int, token: str) -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=3600, show_spinner="Fetching punctuality data...")
+@lru_cache(maxsize=16)
 def fetch_punctuality(timestamp: int, token: str) -> list[dict]:
-    """Fetch Infrabel train punctuality data.
-
-    The *timestamp* is passed directly to the API.  Use ``punctuality_ts(d)``
-    to compute the correct timestamp for a given date (applies the +2 day offset).
-    """
+    """Fetch Infrabel train punctuality data."""
     r = requests.get(
         f"{API_BASE}/infrabel/punctuality",
         params={"timestamp": timestamp},
@@ -114,7 +97,10 @@ OPERATORS = {
 
 def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
                         progress_cb=None):
-    """Download and parse a GTFS parquet for any supported operator."""
+    """Download and parse a GTFS parquet for any supported operator.
+
+    Returns a native gtfs_parquet.Feed (Polars DataFrames).
+    """
     r = requests.get(
         f"{API_BASE}/{operator_slug}/gtfs-parquet",
         params={"timestamp": timestamp},
@@ -133,7 +119,7 @@ def fetch_gtfs_operator(operator_slug: str, timestamp: int, token: str,
             if progress_cb and total:
                 progress_cb(downloaded, total)
         tmp.close()
-        feed = _to_pandas_feed(read_parquet(tmp.name))
+        feed = read_parquet(tmp.name)
     finally:
         os.unlink(tmp.name)
     return feed
