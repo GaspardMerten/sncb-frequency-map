@@ -13,3 +13,5 @@ gtfs-parquet>=0.4.0
 plotly
 scipy
 Pillow
+duckdb
+httpx
