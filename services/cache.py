@@ -8,9 +8,9 @@ from hashlib import sha256
 from threading import Lock
 from typing import Any
 
-# Max entries in the cache. Each punctuality day is ~200-700KB,
-# so 32 entries ≈ 6-22MB. Keeps memory bounded regardless of query range.
-_MAX_ENTRIES = 32
+# Max entries in the cache. Each punctuality day is ~33MB as list-of-dicts,
+# so 8 entries ≈ 260MB. Cloud Run default is 512MB.
+_MAX_ENTRIES = 8
 
 _lock = Lock()
 _store: OrderedDict[str, tuple[float, Any]] = OrderedDict()

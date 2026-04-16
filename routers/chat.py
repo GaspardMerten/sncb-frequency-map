@@ -143,14 +143,18 @@ def _build_report_context(report_summary: dict) -> str:
 
     corridors = report_summary.get("corridors", [])
     if corridors:
-        parts.append(
-            "Corridors:\n"
-            + "\n".join(
-                f"  {c['origin']}→{c['destination']}: {c['pct_missed']}% missed, "
-                f"reliability {c['reliability_pct']}%"
-                for c in corridors
-            )
-        )
+        corr_lines = []
+        for c in corridors:
+            line = (f"  {c['origin']}→{c['destination']}: {c['pct_missed']}% missed, "
+                    f"reliability {c['reliability_pct']}%, "
+                    f"planned={c.get('planned', '?')}, missed={c.get('missed', '?')}")
+            wh = c.get("worst_hours", [])
+            if wh:
+                line += " | worst hours: " + ", ".join(
+                    f"{h['hour']}h ({h['pct']}%, {h['missed']}/{h['planned']})" for h in wh
+                )
+            corr_lines.append(line)
+        parts.append("Corridors:\n" + "\n".join(corr_lines))
 
     lucky = report_summary.get("lucky", {})
     if lucky:
@@ -195,6 +199,16 @@ def _build_report_context(report_summary: dict) -> str:
                 f"rain sensitivity {t['rain_sensitivity']:.1f}x "
                 f"(rainy {t['avg_delay_rainy']:.1f}min vs dry {t['avg_delay_dry']:.1f}min)"
                 for t in ws_trains[:5]
+            )
+        )
+
+    hourly_full = report_summary.get("hourly", [])
+    if hourly_full:
+        parts.append(
+            "Hourly breakdown (all corridors combined):\n"
+            + "\n".join(
+                f"  {h['hour']}h: {h['missed']}/{h['planned']} missed ({h['pct']}%)"
+                for h in hourly_full if h.get('planned', 0) > 0
             )
         )
 

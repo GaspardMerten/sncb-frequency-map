@@ -1553,27 +1553,36 @@ async def api_missed_report(
 
             _emit_processing(ci + 1, n_chunks, "chunk")
 
-            # Load chunk records from cache
-            chunk_records = []
+            # Load chunk records from cache — build DataFrame directly,
+            # avoid mutating cached dicts and avoid list-of-dicts copy
+            day_frames = []
             for d in chunk_dates:
                 data = load_punctuality_data(d)
                 if "error" in data:
                     continue
                 if not station_coords:
                     station_coords = data.get("station_coords", {})
-                for r in data["records"]:
-                    r["_date"] = d.isoformat()
-                    r["_dow"] = d.weekday()
-                chunk_records.extend(data["records"])
+                recs = data["records"]
+                if not recs:
+                    continue
+                day_df = pd.DataFrame(recs)
+                day_df["_date"] = d.isoformat()
+                day_df["_dow"] = d.weekday()
+                day_frames.append(day_df)
+                del data, recs, day_df
 
-            if not chunk_records:
+            if not day_frames:
                 continue
 
-            chunk_df = pd.DataFrame(chunk_records)
-            del chunk_records
+            chunk_df = pd.concat(day_frames, ignore_index=True)
+            del day_frames
             chunk_df = chunk_df[chunk_df["train_serv"] == "SNCB/NMBS"]
             if chunk_df.empty:
                 continue
+            # Drop columns not needed by DuckDB queries to save memory
+            _keep = ["_date", "_dow", "ptcar_lg_nm_nl", "train_no", "relation",
+                     "planned_time_arr", "planned_time_dep", "delay_arr", "delay_dep"]
+            chunk_df = chunk_df[[c for c in _keep if c in chunk_df.columns]]
 
             con = duckdb.connect()
             con.execute(_CREATE_REC_SQL)
