@@ -321,6 +321,7 @@ function MissedReportPage() {
   const [excludeSch, setExcludeSch] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [weatherSearch, setWeatherSearch] = useState("");
 
   const [data, setData] = useState<MissedReportData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1336,8 +1337,28 @@ function MissedReportPage() {
                   Trains whose delays increase the most during rain or wind — candidates for predictive maintenance or schedule padding.
                   Sensitivity = delay in bad weather ÷ delay in good weather (higher = more vulnerable).
                 </p>
+                <div className="relative mb-3">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/40" />
+                  <input
+                    value={weatherSearch}
+                    onChange={(e) => setWeatherSearch(e.target.value)}
+                    placeholder="Search by train, relation, or station..."
+                    className="w-full bg-muted/30 rounded-lg pl-9 pr-3 py-2 text-xs placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                  />
+                </div>
                 <div className="space-y-2">
-                  {data.weather_sensitive_trains.slice(0, 15).map((wt, i) => {
+                  {(weatherSearch.trim()
+                    ? data.weather_sensitive_trains.filter((wt) => {
+                        const q = weatherSearch.toLowerCase();
+                        return (
+                          wt.train.toLowerCase().includes(q) ||
+                          (wt.relation && wt.relation.toLowerCase().includes(q)) ||
+                          (wt.first_station && wt.first_station.toLowerCase().includes(q)) ||
+                          (wt.last_station && wt.last_station.toLowerCase().includes(q))
+                        );
+                      })
+                    : data.weather_sensitive_trains.slice(0, 15)
+                  ).map((wt, i) => {
                     const maxSens = data.weather_sensitive_trains![0]?.rain_sensitivity ?? 1;
                     const barW = Math.max((wt.rain_sensitivity / maxSens) * 100, 4);
                     return (

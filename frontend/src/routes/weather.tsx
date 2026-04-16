@@ -1,6 +1,6 @@
 import { createRoute } from "@tanstack/react-router";
 import { useState, useMemo, useCallback, useRef } from "react";
-import { CloudRain } from "lucide-react";
+import { CloudRain, Search } from "lucide-react";
 import {
   ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, ZAxis, Cell, Legend, BarChart, Bar,
@@ -123,6 +123,7 @@ function WeatherPage() {
   const [error, setError] = useState<string | null>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [wtSearch, setWtSearch] = useState("");
   const abortRef = useRef<AbortController | null>(null);
 
   const loadData = useCallback(async () => {
@@ -426,8 +427,23 @@ function WeatherPage() {
               <p className="text-[10px] text-muted-foreground mb-3">
                 Services whose delays increase most during rain (≥2mm). Sensitivity = avg delay on rainy days ÷ dry days. Only trains averaging ≥1 min delay shown.
               </p>
-              <div className="space-y-1.5">
-                {data.sensitive_trains.slice(0, 10).map((t, i) => {
+              <div className="relative mb-2">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground/40" />
+                <input
+                  value={wtSearch}
+                  onChange={(e) => setWtSearch(e.target.value)}
+                  placeholder="Search train or relation..."
+                  className="w-full bg-muted/30 rounded-lg pl-7 pr-3 py-1.5 text-[10px] placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                />
+              </div>
+              <div className="space-y-1.5 max-h-[400px] overflow-y-auto">
+                {(wtSearch.trim()
+                  ? data.sensitive_trains.filter((t) => {
+                      const q = wtSearch.toLowerCase();
+                      return t.train.toLowerCase().includes(q) || (t.relation && t.relation.toLowerCase().includes(q));
+                    })
+                  : data.sensitive_trains.slice(0, 10)
+                ).map((t, i) => {
                   const maxS = data.sensitive_trains![0]?.rain_sensitivity ?? 1;
                   return (
                     <div key={t.train} className="flex items-center gap-3 text-xs">
