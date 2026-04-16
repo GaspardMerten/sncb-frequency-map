@@ -433,6 +433,8 @@ function MissedReportPage() {
     ];
   }, [data]);
 
+  const [stationSort, setStationSort] = useState<"pct" | "impact">("impact");
+
   // Stations sorted by selected metric for "worst stations" section
   const allStations = useMemo(() => {
     if (!data) return [];
@@ -444,7 +446,6 @@ function MissedReportPage() {
   }, [data, stationSort]);
 
   const [stationSearch, setStationSearch] = useState("");
-  const [stationSort, setStationSort] = useState<"pct" | "impact">("impact");
   const [stationPage, setStationPage] = useState(0);
   const STATIONS_PER_PAGE = 10;
 
