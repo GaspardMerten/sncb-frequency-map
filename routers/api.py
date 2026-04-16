@@ -2060,14 +2060,16 @@ async def api_missed_report(
         train_route_map: dict[str, tuple[str, str]] = {}
         if all_train_routes:
             tr_merged = pd.concat(all_train_routes, ignore_index=True)
-            # Pick the most common first/last per train
-            for tn, grp in tr_merged.groupby("train_no"):
-                first = grp["first_station"].mode()
-                last = grp["last_station"].mode()
-                train_route_map[tn] = (
-                    first.iloc[0] if len(first) > 0 else "",
-                    last.iloc[0] if len(last) > 0 else "",
-                )
+            # Vectorized: count occurrences, pick most frequent per train
+            for col, idx in [("first_station", 0), ("last_station", 1)]:
+                best = tr_merged.groupby(["train_no", col]).size().reset_index(name="cnt")
+                best = best.sort_values("cnt", ascending=False).drop_duplicates("train_no")
+                for tn, val in zip(best["train_no"], best[col]):
+                    if tn not in train_route_map:
+                        train_route_map[tn] = ("", "")
+                    lst = list(train_route_map[tn])
+                    lst[idx] = val
+                    train_route_map[tn] = tuple(lst)
         del all_train_routes
 
         # ---- Weather sensitivity per train ----
@@ -2093,71 +2095,75 @@ async def api_missed_report(
                     wind_by_date[wd["date"]] = wd.get("wind_kmh", 0) or 0
 
             if precip_by_date:
-                # For each train, split days into bad-weather vs good-weather
-                for tn, grp in td_agg.groupby("train_no"):
-                    if len(grp) < 5:
-                        continue
-                    rainy_delays = []
-                    dry_delays = []
-                    windy_delays = []
-                    calm_delays = []
-                    all_delays = []
-                    for _, row in grp.iterrows():
-                        d = row["day_date"]
-                        delay = float(row["avg_delay_min"])
-                        all_delays.append(delay)
-                        precip = precip_by_date.get(d, 0)
-                        wind = wind_by_date.get(d, 0)
-                        if precip >= 2.0:
-                            rainy_delays.append(delay)
-                        else:
-                            dry_delays.append(delay)
-                        if wind >= 40:
-                            windy_delays.append(delay)
-                        else:
-                            calm_delays.append(delay)
+                # Vectorized weather sensitivity — avoid iterrows
+                td_agg["precip"] = td_agg["day_date"].map(precip_by_date).fillna(0)
+                td_agg["wind"] = td_agg["day_date"].map(wind_by_date).fillna(0)
+                td_agg["is_rainy"] = td_agg["precip"] >= 2.0
+                td_agg["is_windy"] = td_agg["wind"] >= 40
 
-                    if len(rainy_delays) < 3 or len(dry_delays) < 3:
-                        continue
+                # Filter trains with enough days
+                train_counts = td_agg.groupby("train_no").size()
+                valid_trains = train_counts[train_counts >= 5].index
+                td_valid = td_agg[td_agg["train_no"].isin(valid_trains)]
 
-                    avg_rainy = sum(rainy_delays) / len(rainy_delays)
-                    avg_dry = sum(dry_delays) / len(dry_delays)
-                    avg_all = sum(all_delays) / len(all_delays)
+                # Count rainy/dry days per train
+                weather_counts = td_valid.groupby("train_no").agg(
+                    n_rainy=("is_rainy", "sum"), n_dry=("is_rainy", lambda x: (~x).sum()),
+                    n_total=("avg_delay_min", "count"),
+                ).reset_index()
+                # Need >= 3 rainy AND >= 3 dry
+                good_trains = weather_counts[
+                    (weather_counts["n_rainy"] >= 3) & (weather_counts["n_dry"] >= 3)
+                ]["train_no"]
+                td_good = td_valid[td_valid["train_no"].isin(good_trains)]
 
-                    # Sensitivity: ratio of delay in rain vs dry
-                    if avg_dry > 0.1:
-                        rain_sensitivity = avg_rainy / avg_dry
-                    else:
-                        rain_sensitivity = avg_rainy / 0.1
+                if not td_good.empty:
+                    # Compute per-train averages by weather condition
+                    avg_all = td_good.groupby("train_no")["avg_delay_min"].mean()
+                    avg_rainy = td_good[td_good["is_rainy"]].groupby("train_no")["avg_delay_min"].mean()
+                    avg_dry = td_good[~td_good["is_rainy"]].groupby("train_no")["avg_delay_min"].mean()
 
-                    wind_sensitivity = None
-                    if windy_delays and calm_delays:
-                        avg_windy = sum(windy_delays) / len(windy_delays)
-                        avg_calm = sum(calm_delays) / len(calm_delays)
-                        if avg_calm > 0.1:
-                            wind_sensitivity = round(avg_windy / avg_calm, 2)
+                    # Wind sensitivity
+                    windy_mask = td_good["is_windy"]
+                    avg_windy = td_good[windy_mask].groupby("train_no")["avg_delay_min"].mean() if windy_mask.any() else pd.Series(dtype=float)
+                    avg_calm = td_good[~windy_mask].groupby("train_no")["avg_delay_min"].mean() if (~windy_mask).any() else pd.Series(dtype=float)
 
-                    rel = grp["relation"].mode()
-                    relation = rel.iloc[0] if len(rel) > 0 else ""
-                    route = train_route_map.get(tn, ("", ""))
+                    # Get relation per train (most common)
+                    rel_mode = td_good.groupby("train_no")["relation"].agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else "")
+                    n_days_per = td_good.groupby("train_no").size()
+                    n_rainy_per = td_good[td_good["is_rainy"]].groupby("train_no").size()
+                    n_dry_per = td_good[~td_good["is_rainy"]].groupby("train_no").size()
 
-                    weather_trains.append({
-                        "train": tn,
-                        "relation": relation,
-                        "first_station": route[0],
-                        "last_station": route[1],
-                        "n_days": len(grp),
-                        "avg_delay_min": round(avg_all, 1),
-                        "avg_delay_rainy": round(avg_rainy, 1),
-                        "avg_delay_dry": round(avg_dry, 1),
-                        "rain_sensitivity": round(rain_sensitivity, 2),
-                        "wind_sensitivity": wind_sensitivity,
-                        "rainy_days": len(rainy_delays),
-                        "dry_days": len(dry_delays),
-                    })
+                    for tn in good_trains:
+                        ar = avg_rainy.get(tn, 0)
+                        ad = avg_dry.get(tn, 0.1)
+                        if ad < 0.1:
+                            ad = 0.1
+                        rain_sens = ar / ad
+                        ws = None
+                        if tn in avg_windy.index and tn in avg_calm.index:
+                            ac = avg_calm[tn]
+                            if ac > 0.1:
+                                ws = round(avg_windy[tn] / ac, 2)
 
-                weather_trains.sort(key=lambda x: -x["rain_sensitivity"])
-                weather_trains = weather_trains[:30]
+                        route = train_route_map.get(tn, ("", ""))
+                        weather_trains.append({
+                            "train": tn,
+                            "relation": rel_mode.get(tn, ""),
+                            "first_station": route[0],
+                            "last_station": route[1],
+                            "n_days": int(n_days_per.get(tn, 0)),
+                            "avg_delay_min": round(float(avg_all.get(tn, 0)), 1),
+                            "avg_delay_rainy": round(float(ar), 1),
+                            "avg_delay_dry": round(float(avg_dry.get(tn, 0)), 1),
+                            "rain_sensitivity": round(rain_sens, 2),
+                            "wind_sensitivity": ws,
+                            "rainy_days": int(n_rainy_per.get(tn, 0)),
+                            "dry_days": int(n_dry_per.get(tn, 0)),
+                        })
+
+                    weather_trains.sort(key=lambda x: -x["rain_sensitivity"])
+                    weather_trains = weather_trains[:30]
         else:
             if all_train_daily:
                 del all_train_daily
