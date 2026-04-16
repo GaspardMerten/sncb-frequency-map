@@ -953,11 +953,23 @@ function MissedReportPage() {
                           </p>
                           <p className="text-[10px] text-muted-foreground/40">via {cr.via}</p>
                         </div>
-                        <div className={cn(
-                          "text-3xl font-black leading-none",
-                          cr.pct_missed > 15 ? "text-destructive" : cr.pct_missed > 8 ? "text-warning" : "text-success",
-                        )}>
-                          {cr.reliability_pct.toFixed(0)}%
+                        <div className="text-right">
+                          <div className={cn(
+                            "text-3xl font-black leading-none",
+                            cr.pct_missed > 15 ? "text-destructive" : cr.pct_missed > 8 ? "text-warning" : "text-success",
+                          )}>
+                            {cr.pct_missed.toFixed(1)}%
+                          </div>
+                          <p className="text-[9px] text-muted-foreground/50 mt-0.5">avg miss rate</p>
+                          {cr.worst_hours.length > 0 && (() => {
+                            const worst = cr.worst_hours.reduce((a, b) => a.pct > b.pct ? a : b);
+                            return (
+                              <div className="mt-1">
+                                <span className="text-lg font-black text-destructive leading-none">{worst.pct.toFixed(1)}%</span>
+                                <span className="text-[9px] text-muted-foreground/50 ml-1">peak at {worst.hour}h</span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                       <div className="h-2 rounded-full bg-muted overflow-hidden mb-3">
