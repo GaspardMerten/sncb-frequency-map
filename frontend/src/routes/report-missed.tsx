@@ -11,7 +11,7 @@ import {
   Settings2,
   AlertTriangle,
   Download,
-  CloudRain, Search, MessageCircle} from "lucide-react";
+  CloudRain, Search, MessageCircle, Lightbulb, ArrowRight} from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -148,6 +148,45 @@ interface WeatherSensitiveTrain {
   dry_days: number;
 }
 
+
+interface OptBufferPoint {
+  buffer_min: number;
+  planned: number;
+  missed: number;
+  pct: number;
+}
+
+interface OptRecommendation {
+  station: string;
+  total_missed: number;
+  total_planned: number;
+  pct_missed: number;
+  delta_min: number;
+  saved_local: number;
+  new_misses_downstream: number;
+  saved_downstream: number;
+  net_benefit: number;
+  net_pct_of_station: number;
+}
+
+interface OptQuickWin {
+  station: string;
+  arr_train: string;
+  dep_train: string;
+  count: number;
+  avg_overshoot_sec: number;
+}
+
+interface Optimization {
+  buffer_curve: OptBufferPoint[];
+  recommendations: OptRecommendation[];
+  quick_wins: OptQuickWin[];
+  barely_missed_pct: number;
+  total_missed: number;
+  total_net_saveable: number;
+  net_saveable_pct: number;
+}
+
 interface MissedReportData {
   overview: {
     total_connections: number;
@@ -190,6 +229,7 @@ interface MissedReportData {
   domino_trains: DominoTrain[];
   weather: WeatherSection | null;
   weather_sensitive_trains?: WeatherSensitiveTrain[];
+  optimization?: Optimization | null;
   error?: string;
 }
 
@@ -1433,6 +1473,145 @@ function MissedReportPage() {
                       ({top.avg_delay_rainy.toFixed(1)} min vs {top.avg_delay_dry.toFixed(1)} min dry).
                     </>;
                   })()}
+                </Callout>
+              </StorySection>
+            )}
+
+
+            {/* ── OPTIMIZATION: HOW TO IMPROVE ── */}
+            {data.optimization && data.optimization.recommendations.length > 0 && (
+              <StorySection id="optimization" className="mt-28 print:mt-12 print:break-before-page">
+                <Heading>How to improve connections</Heading>
+                <p className="text-sm text-muted-foreground/60 -mt-4 mb-6">
+                  Network-aware simulation: for each station, we model adding buffer time and trace the ripple effect downstream.
+                  Adding buffer saves local connections but delays the departing train, which may cause new misses at later stations.
+                  Only recommendations with a <b>positive net benefit</b> are shown.
+                </p>
+
+                {/* Key stats */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+                  <Card>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">Barely missed</p>
+                    <p className="text-2xl font-black mt-1">{data.optimization.barely_missed_pct}%</p>
+                    <p className="text-[10px] text-muted-foreground/40 mt-0.5">missed by &lt;3 min</p>
+                  </Card>
+                  <Card>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">Net saveable</p>
+                    <p className="text-2xl font-black text-emerald-600 mt-1">{fmt(data.optimization.total_net_saveable)}</p>
+                    <p className="text-[10px] text-muted-foreground/40 mt-0.5">{data.optimization.net_saveable_pct}% of all misses</p>
+                  </Card>
+                  <Card>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">Total missed</p>
+                    <p className="text-2xl font-black mt-1">{fmt(data.optimization.total_missed)}</p>
+                    <p className="text-[10px] text-muted-foreground/40 mt-0.5">in analysis period</p>
+                  </Card>
+                  <Card>
+                    <p className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">Top 10 stations</p>
+                    <p className="text-2xl font-black mt-1">{data.optimization.recommendations.length}</p>
+                    <p className="text-[10px] text-muted-foreground/40 mt-0.5">with positive net benefit</p>
+                  </Card>
+                </div>
+
+                {/* Buffer sensitivity curve */}
+                {data.optimization.buffer_curve.length > 0 && (
+                  <Card className="mb-6">
+                    <h3 className="text-sm font-semibold mb-1">Buffer sensitivity</h3>
+                    <p className="text-[10px] text-muted-foreground/50 mb-3">
+                      Miss rate as a function of minimum transfer buffer. Current default: 2 min.
+                      Increasing buffer excludes tight connections but those that remain are more reliable.
+                    </p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <AreaChart data={data.optimization.buffer_curve} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
+                        <XAxis dataKey="buffer_min" tick={{ fontSize: 10 }} tickFormatter={(v: number) => `${v}m`} />
+                        <YAxis tick={{ fontSize: 10 }} domain={[0, "auto"]} tickFormatter={(v: number) => `${v}%`} />
+                        <Tooltip contentStyle={TT} formatter={(v: number) => [`${v}%`, "Miss rate"]} labelFormatter={(v: number) => `${v} min buffer`} />
+                        <Area dataKey="pct" stroke="hsl(220, 70%, 55%)" fill="hsl(220, 70%, 55%)" fillOpacity={0.15} strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </Card>
+                )}
+
+                {/* Recommendations */}
+                <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                  <Lightbulb className="w-4 h-4 text-amber-500" />
+                  Top recommendations
+                </h3>
+                <p className="text-[10px] text-muted-foreground/50 mb-4">
+                  Each recommendation accounts for downstream propagation: delaying a departing train here
+                  means it arrives later at subsequent stations, potentially breaking other connections.
+                  Green = net connections saved after accounting for all network effects.
+                </p>
+                <div className="space-y-2 mb-6">
+                  {data.optimization.recommendations.map((rec, i) => {
+                    const maxNet = data.optimization!.recommendations[0]?.net_benefit ?? 1;
+                    const barW = Math.max((rec.net_benefit / maxNet) * 100, 4);
+                    return (
+                      <div key={rec.station} className="rounded-2xl border border-border/40 bg-card px-5 py-3 shadow-sm">
+                        <div className="flex items-center gap-4">
+                          <span className="text-lg font-black text-muted-foreground/30 w-6 text-right shrink-0">{i + 1}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-baseline justify-between mb-1">
+                              <div className="min-w-0">
+                                <span className="text-sm font-bold">{titleCase(rec.station)}</span>
+                                <span className="text-[10px] text-muted-foreground/50 ml-2">+{rec.delta_min} min buffer</span>
+                              </div>
+                              <div className="text-right ml-2 shrink-0">
+                                <span className="text-xl font-black text-emerald-600 tabular-nums">+{rec.net_benefit}</span>
+                                <p className="text-[9px] text-muted-foreground/50">net saved</p>
+                              </div>
+                            </div>
+                            <div className="h-2 rounded-full bg-muted/60 overflow-hidden mb-1.5">
+                              <div className="h-full rounded-full bg-emerald-500/70 transition-all duration-700" style={{ width: `${barW}%` }} />
+                            </div>
+                            <div className="flex items-center gap-1 text-[10px] text-muted-foreground/50 flex-wrap">
+                              <span className="text-emerald-600 font-semibold">+{rec.saved_local} saved locally</span>
+                              <ArrowRight className="w-2.5 h-2.5" />
+                              <span className="text-destructive font-semibold">-{rec.new_misses_downstream} broken downstream</span>
+                              <ArrowRight className="w-2.5 h-2.5" />
+                              <span className="text-emerald-600 font-semibold">+{rec.saved_downstream} saved downstream</span>
+                              <span className="ml-auto">({rec.net_pct_of_station}% of station misses)</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Quick wins */}
+                {data.optimization.quick_wins.length > 0 && (
+                  <Card>
+                    <h3 className="text-sm font-semibold mb-1">Quick wins — closest misses</h3>
+                    <p className="text-[10px] text-muted-foreground/50 mb-3">
+                      Specific train-pair connections that were missed by under 2 minutes.
+                      These are the easiest to fix with minimal schedule adjustments.
+                    </p>
+                    <div className="space-y-1.5">
+                      {data.optimization.quick_wins.map((qw, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs bg-muted/20 rounded-lg px-3 py-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-muted-foreground/40 font-bold w-4">{i + 1}</span>
+                            <span className="font-medium truncate">{titleCase(qw.station)}</span>
+                            <span className="text-[10px] text-muted-foreground/40 font-mono">
+                              {qw.arr_train} <ArrowRight className="w-2.5 h-2.5 inline" /> {qw.dep_train}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-amber-600 font-bold">{Math.round(qw.avg_overshoot_sec)}s late</span>
+                            <span className="text-muted-foreground/60">{qw.count}× missed</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                )}
+
+                <Callout>
+                  By optimizing buffer times at just the top {data.optimization.recommendations.length} stations
+                  (accounting for network propagation effects),
+                  we could save an estimated <b className="text-emerald-600">{fmt(data.optimization.total_net_saveable)} connections</b> ({data.optimization.net_saveable_pct}% of all misses).
+                  {data.optimization.barely_missed_pct > 30 && <> Notably, <b>{data.optimization.barely_missed_pct}%</b> of all missed connections
+                  were missed by less than 3 minutes — small schedule adjustments could have large effects.</>}
                 </Callout>
               </StorySection>
             )}
