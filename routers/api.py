@@ -1899,24 +1899,26 @@ async def api_missed_report(
                             r = float(np.corrcoef(mp_arr, v_arr)[0, 1])
                             correlations[name] = round(r, 3)
 
+                # Require >=5 days per category for a meaningful comparison
+                _MIN_DAYS = 5
                 rainy_miss = [mp for mp, pr in zip(miss_pcts, precip_vals) if pr >= 1.0]
                 dry_miss = [mp for mp, pr in zip(miss_pcts, precip_vals) if pr < 1.0]
                 comparison = {}
-                if rainy_miss and dry_miss:
+                if len(rainy_miss) >= _MIN_DAYS and len(dry_miss) >= _MIN_DAYS:
                     comparison["rainy_avg_pct"] = round(sum(rainy_miss) / len(rainy_miss), 2)
                     comparison["dry_avg_pct"] = round(sum(dry_miss) / len(dry_miss), 2)
                     comparison["rainy_days"] = len(rainy_miss)
                     comparison["dry_days"] = len(dry_miss)
                 windy_miss = [mp for mp, w in zip(miss_pcts, wind_vals) if w >= 40]
                 calm_miss = [mp for mp, w in zip(miss_pcts, wind_vals) if w < 40]
-                if windy_miss and calm_miss:
+                if len(windy_miss) >= _MIN_DAYS and len(calm_miss) >= _MIN_DAYS:
                     comparison["windy_avg_pct"] = round(sum(windy_miss) / len(windy_miss), 2)
                     comparison["calm_avg_pct"] = round(sum(calm_miss) / len(calm_miss), 2)
                     comparison["windy_days"] = len(windy_miss)
                     comparison["calm_days"] = len(calm_miss)
                 cold_miss = [mp for mp, t in zip(miss_pcts, temp_vals) if t < 5]
                 mild_miss = [mp for mp, t in zip(miss_pcts, temp_vals) if t >= 5]
-                if cold_miss and mild_miss:
+                if len(cold_miss) >= _MIN_DAYS and len(mild_miss) >= _MIN_DAYS:
                     comparison["cold_avg_pct"] = round(sum(cold_miss) / len(cold_miss), 2)
                     comparison["mild_avg_pct"] = round(sum(mild_miss) / len(mild_miss), 2)
                     comparison["cold_days"] = len(cold_miss)
@@ -1988,7 +1990,7 @@ async def api_missed_report(
                         else:
                             calm_delays.append(delay)
 
-                    if not rainy_delays or not dry_delays:
+                    if len(rainy_delays) < 3 or len(dry_delays) < 3:
                         continue
 
                     avg_rainy = sum(rainy_delays) / len(rainy_delays)

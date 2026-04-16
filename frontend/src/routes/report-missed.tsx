@@ -433,15 +433,18 @@ function MissedReportPage() {
     ];
   }, [data]);
 
-  // Stations sorted by failure rate (%) for "worst stations" section
+  // Stations sorted by selected metric for "worst stations" section
   const allStations = useMemo(() => {
     if (!data) return [];
     return [...data.stations]
       .filter((s) => s.planned >= 50)
-      .sort((a, b) => b.pct_missed - a.pct_missed);
-  }, [data]);
+      .sort((a, b) => stationSort === "impact"
+        ? b.impact_score - a.impact_score
+        : b.pct_missed - a.pct_missed);
+  }, [data, stationSort]);
 
   const [stationSearch, setStationSearch] = useState("");
+  const [stationSort, setStationSort] = useState<"pct" | "impact">("impact");
   const [stationPage, setStationPage] = useState(0);
   const STATIONS_PER_PAGE = 10;
 
@@ -805,13 +808,16 @@ function MissedReportPage() {
 
             {/* ── WORST STATIONS ── */}
             <StorySection id="worst" className="mt-28 print:mt-12 print:break-before-page">
-              <Heading>Highest failure rate stations</Heading>
+              <Heading>Station rankings</Heading>
               <p className="text-sm text-muted-foreground/60 -mt-4 mb-5">
-                Ranked by percentage of connections missed — stations with under 50 connections excluded.
+                {stationSort === "impact"
+                  ? <>Ranked by <b>impact score</b> (missed × sqrt(miss rate)) — balances volume and severity.</>
+                  : <>Ranked by <b>miss rate</b> — highest percentage of connections missed.</>}
+                {" "}Stations with under 50 connections excluded.
                 {allStations.length > STATIONS_PER_PAGE && <> Showing {filteredStations.length} of {allStations.length} stations.</>}
               </p>
 
-              {/* Search (hidden in print) */}
+              {/* Search + sort toggle (hidden in print) */}
               <div className="flex items-center gap-3 mb-4 print:hidden">
                 <div className="relative flex-1 max-w-xs">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/40" />
@@ -822,6 +828,16 @@ function MissedReportPage() {
                     onChange={(e) => setStationSearch(e.target.value)}
                     className="w-full h-9 pl-9 pr-3 text-xs rounded-xl border border-border/40 bg-card focus:outline-none focus:ring-1 focus:ring-primary/30"
                   />
+                </div>
+                <div className="flex items-center rounded-lg border border-border/40 overflow-hidden text-[10px] shrink-0">
+                  <button
+                    onClick={() => setStationSort("impact")}
+                    className={cn("px-2.5 py-1.5 transition-colors cursor-pointer", stationSort === "impact" ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:bg-muted/50")}
+                  >Impact</button>
+                  <button
+                    onClick={() => setStationSort("pct")}
+                    className={cn("px-2.5 py-1.5 transition-colors cursor-pointer", stationSort === "pct" ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground hover:bg-muted/50")}
+                  >Miss rate</button>
                 </div>
                 <span className="text-[10px] text-muted-foreground/40">{filteredStations.length} result{filteredStations.length !== 1 ? "s" : ""}</span>
               </div>

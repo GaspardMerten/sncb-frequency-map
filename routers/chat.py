@@ -1,13 +1,11 @@
 """Chat endpoint for the missed-connections report chatbot.
 
 Uses Google Gemini to answer questions about report data,
-with tool-calling support for fetching additional data and
-generating chart specifications.
+with tool-calling support for generating chart specifications.
 """
 
 import json
 import os
-from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -81,149 +79,59 @@ You help the user understand the report data, spot patterns, and draw conclusion
 
 ## Your capabilities
 - Explain any section of the report (overview, daily/hourly patterns, stations, corridors, weather, etc.)
-- Perform calculations on the provided data
+- Perform calculations and cross-reference data across sections
 - Generate charts using the `render_chart` tool to visualize insights
-- Compare metrics across different dimensions
+- Compare metrics across different dimensions (hours, days, stations, corridors)
 
 ## Guidelines
 - Be concise but insightful — prioritize actionable findings
 - Use Belgian railway context (SNCB/NMBS, common routes, commuter patterns)
 - When showing numbers, use the exact data from the report context
-- If the user asks about data not in the report, explain what data is available
+- If the user asks about data not in the report, explain what data IS available
 - Proactively suggest interesting analyses when appropriate
 - Use render_chart to create visualizations when they'd help explain a point
 - Answer in the same language the user writes in (French, Dutch, English)
+- When comparing or ranking, always cite the numbers from the data
 
-## Report context
-The report analyzes missed train connections: when a connecting train departs before a delayed arriving train reaches the station.
-Key metrics: planned connections, missed connections, miss rate, added wait time, close calls (connections saved despite delays).
+## Key metric definitions
+- **Planned connections**: number of arriving_train→departing_train pairs where the planned gap
+  was between min_transfer and max_transfer minutes (typically 2-15 min) at the same station
+- **Missed connection**: a planned connection where the arriving train was late enough that it
+  arrived AFTER the departing train left (actual_arr > actual_dep)
+- **Miss rate (pct)**: missed / planned × 100
+- **Close call**: a connection where the arriving train was delayed (delay_arr > 0) but the
+  connection was still made (actual_arr <= actual_dep) — i.e., nearly missed but saved
+- **Impact score** (for stations): missed_count × sqrt(pct_missed/100). This weights both volume
+  and rate — a station with 1000 misses at 10% is ranked higher than one with 100 misses at 50%.
+  Stations are sorted by impact score in the report.
+- **Added wait time**: when a connection is missed, the extra minutes the passenger must wait
+  for the next available departure at that station. Only counted when next departure found within 60 min.
+- **Domino trains**: arriving trains that cause the most missed connections across multiple stations.
+  Sorted by total_missed_caused. n_days_seen = max days seen at any single station (not sum across stations).
+- **Rain sensitivity** (weather-sensitive trains): avg_delay_rainy / avg_delay_dry. A value of 2.0×
+  means the train is twice as delayed on rainy days. Only shown when ≥3 rainy AND ≥3 dry days exist.
+- **Corridors**: track connections for specific origin→destination city pairs routed through Brussels.
+  Each corridor has worst_hours showing which hours have the highest miss rate on that specific route.
+
+## Data structure
+The full report JSON is provided below. You have access to ALL data the user sees. Key sections:
+- overview: period, totals, percentages
+- hourly[]: per-hour planned/missed/pct for ALL hours 0-23
+- daily[]: per-day breakdown with day-of-week
+- dow_summary[]: aggregated by day of week
+- stations[]: top stations with planned/missed/pct_missed/impact_score, some have worst_pairs[]
+- corridors[]: per-corridor with planned/missed/pct_missed AND worst_hours[] per corridor
+- hub_spotlight[]: detailed per-station analysis with heatmap[] (hour×dow grid) and toxic_arrivals[]
+- domino_trains[]: trains causing most downstream misses
+- lucky: close-call statistics
+- added_wait: wait time distribution
+- weather: daily weather data with correlations and comparison (rain/wind/cold thresholds)
+- weather_sensitive_trains[]: per-train rain/wind sensitivity
+
+Cross-reference freely. For example, if asked "which corridor is worst at 18h", look at each
+corridor's worst_hours array for hour=18. If asked about a specific station's hourly pattern,
+check hub_spotlight for that station's heatmap data.
 """
-
-
-def _build_report_context(report_summary: dict) -> str:
-    """Build a concise text summary of report data for the LLM context."""
-    parts = []
-    ov = report_summary.get("overview", {})
-    if ov:
-        parts.append(
-            f"Period: {ov.get('start_date', '?')} to {ov.get('end_date', '?')} ({ov.get('n_days', '?')} days)\n"
-            f"Total connections: {ov.get('total_connections', 0):,} | "
-            f"Missed: {ov.get('total_missed', 0):,} ({ov.get('pct_missed', 0)}%)\n"
-            f"Close calls (saved): {ov.get('close_calls', 0):,} | "
-            f"Total added wait: {ov.get('total_added_wait_minutes', 0):,.0f} min"
-        )
-
-    hourly = report_summary.get("hourly", [])
-    if hourly:
-        worst = sorted(hourly, key=lambda h: -h.get("pct", 0))[:3]
-        parts.append(
-            "Worst hours: "
-            + ", ".join(f"{h['hour']}h ({h['pct']}%)" for h in worst)
-        )
-
-    dow = report_summary.get("dow_summary", [])
-    if dow:
-        worst_d = sorted(dow, key=lambda d: -d.get("pct", 0))[:2]
-        parts.append(
-            "Worst days: "
-            + ", ".join(f"{d['label']} ({d['pct']}%)" for d in worst_d)
-        )
-
-    stations = report_summary.get("stations", [])
-    if stations:
-        top = stations[:10]
-        parts.append(
-            "Top 10 stations by impact:\n"
-            + "\n".join(
-                f"  {s['name']}: {s['missed']}/{s['planned']} missed ({s['pct_missed']}%), "
-                f"impact={s.get('impact_score', 0):.0f}"
-                for s in top
-            )
-        )
-
-    corridors = report_summary.get("corridors", [])
-    if corridors:
-        corr_lines = []
-        for c in corridors:
-            line = (f"  {c['origin']}→{c['destination']}: {c['pct_missed']}% missed, "
-                    f"reliability {c['reliability_pct']}%, "
-                    f"planned={c.get('planned', '?')}, missed={c.get('missed', '?')}")
-            wh = c.get("worst_hours", [])
-            if wh:
-                line += " | worst hours: " + ", ".join(
-                    f"{h['hour']}h ({h['pct']}%, {h['missed']}/{h['planned']})" for h in wh
-                )
-            corr_lines.append(line)
-        parts.append("Corridors:\n" + "\n".join(corr_lines))
-
-    lucky = report_summary.get("lucky", {})
-    if lucky:
-        parts.append(
-            f"Close calls: {lucky.get('total_close_calls', 0):,} "
-            f"({lucky.get('pct_saved', 0)}% of at-risk connections saved)"
-        )
-
-    wait = report_summary.get("added_wait", {})
-    if wait:
-        parts.append(
-            f"Added wait: avg {wait.get('avg_wait_min', 0):.1f} min, "
-            f"median {wait.get('median_wait_min', 0):.1f} min"
-        )
-
-    domino = report_summary.get("domino_trains", [])
-    if domino:
-        top_d = domino[:5]
-        parts.append(
-            "Top domino trains (cause most downstream misses):\n"
-            + "\n".join(
-                f"  {t.get('relation', t['train'])} ({t['train']}): "
-                f"{t['total_missed_caused']} misses across {t['n_stations']} stations"
-                for t in top_d
-            )
-        )
-
-    weather = report_summary.get("weather")
-    if weather:
-        corr = weather.get("correlations", {})
-        parts.append(
-            "Weather correlations: "
-            + ", ".join(f"{k}={v:.2f}" for k, v in corr.items())
-        )
-
-    ws_trains = report_summary.get("weather_sensitive_trains", [])
-    if ws_trains:
-        parts.append(
-            f"Weather-sensitive trains: {len(ws_trains)} identified\n"
-            + "\n".join(
-                f"  {t.get('relation', t['train'])}: "
-                f"rain sensitivity {t['rain_sensitivity']:.1f}x "
-                f"(rainy {t['avg_delay_rainy']:.1f}min vs dry {t['avg_delay_dry']:.1f}min)"
-                for t in ws_trains[:5]
-            )
-        )
-
-    hourly_full = report_summary.get("hourly", [])
-    if hourly_full:
-        parts.append(
-            "Hourly breakdown (all corridors combined):\n"
-            + "\n".join(
-                f"  {h['hour']}h: {h['missed']}/{h['planned']} missed ({h['pct']}%)"
-                for h in hourly_full if h.get('planned', 0) > 0
-            )
-        )
-
-    daily = report_summary.get("daily", [])
-    if daily:
-        parts.append(
-            "Daily breakdown:\n"
-            + "\n".join(
-                f"  {d['date']} ({d['dow_label']}): "
-                f"{d['missed']}/{d['planned']} ({d['pct']}%)"
-                for d in daily
-            )
-        )
-
-    return "\n\n".join(parts)
 
 
 @router.post("/chat")
@@ -233,7 +141,9 @@ async def chat_endpoint(request: Request):
     messages: list[dict] = body.get("messages", [])
     report_data: dict = body.get("report_data", {})
 
-    report_context = _build_report_context(report_data)
+    # Send the full report JSON — Gemini has a large context window
+    # and can parse structured data better than a lossy text summary
+    report_json = json.dumps(report_data, default=str, ensure_ascii=False)
 
     # Build Gemini contents array
     contents = []
@@ -249,7 +159,7 @@ async def chat_endpoint(request: Request):
         "systemInstruction": {
             "parts": [
                 {"text": _SYSTEM_PROMPT},
-                {"text": f"## Current report data\n\n{report_context}"},
+                {"text": f"## Full report data (JSON)\n\n{report_json}"},
             ]
         },
         "tools": _TOOLS,
@@ -261,7 +171,6 @@ async def chat_endpoint(request: Request):
 
     async def stream():
         async with httpx.AsyncClient(timeout=60.0) as client:
-            tool_calls_pending = []
             async with client.stream(
                 "POST", _GEMINI_URL, json=gemini_body
             ) as response:
