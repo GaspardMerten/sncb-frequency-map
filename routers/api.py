@@ -1476,8 +1476,7 @@ async def api_missed_report(
         all_wait_times: list[float] = []
         all_train_routes: list[pd.DataFrame] = []
         all_train_daily: list[pd.DataFrame] = []  # per-train per-day delay for weather sensitivity
-        all_opt_connections: list[pd.DataFrame] = []  # per-connection detail for optimization
-        all_opt_stops: list[pd.DataFrame] = []  # train stop order for downstream propagation
+        all_opt_data: list[dict] = []  # per-chunk DuckDB optimization results
         station_coords: dict[str, dict] = {}
 
         # Corridor accumulators — filled per chunk via DuckDB
@@ -1761,29 +1760,131 @@ async def api_missed_report(
             if not train_daily.empty:
                 all_train_daily.append(train_daily)
 
-            # ---- Optimization data: connection details + train stop order ----
-            opt_conn = con.execute("""
-                SELECT station, arr_train, dep_train, day_date,
-                       gap, arr_actual, dep_actual, delay_arr, missed,
-                       dep_actual - arr_actual AS margin_sec
-                FROM connections
+            # ---- Optimization: run simulation inside DuckDB (no large data pull) ----
+            # 1. Buffer sensitivity: count misses at each virtual buffer level
+            buf_sens = con.execute("""
+                SELECT gap_bucket AS buffer_min,
+                       COUNT(*) AS planned,
+                       SUM(missed) AS missed
+                FROM (
+                    SELECT *, CAST(gap / 60 AS INT) AS gap_bucket
+                    FROM connections
+                )
+                GROUP BY gap_bucket
+                HAVING gap_bucket BETWEEN 1 AND 20
+                ORDER BY gap_bucket
             """).fetchdf()
-            if not opt_conn.empty:
-                all_opt_connections.append(opt_conn)
 
-            opt_stops = con.execute("""
-                SELECT train_no, station, day_date,
-                       arr_sec, dep_sec, delay_arr, delay_dep,
-                       arr_sec + delay_arr AS actual_arr,
-                       dep_sec + delay_dep AS actual_dep,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY train_no, day_date
-                           ORDER BY CASE WHEN dep_sec >= 0 THEN dep_sec ELSE arr_sec END ASC
-                       ) AS stop_order
-                FROM rec
+            # 2. Barely missed: connections missed by <180s
+            barely = con.execute("""
+                SELECT COUNT(*) FILTER (WHERE arr_actual - dep_actual <= 180) AS barely,
+                       COUNT(*) AS total
+                FROM connections WHERE missed = 1
+            """).fetchone()
+
+            # 3. Per-station: for each delta (1,2,3,5 min), count local saves,
+            #    downstream new misses, and downstream saves — ALL in SQL
+            opt_result = con.execute("""
+                WITH train_route AS (
+                    SELECT train_no, day_date, station,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY train_no, day_date
+                               ORDER BY CASE WHEN dep_sec >= 0 THEN dep_sec ELSE arr_sec END ASC
+                           ) AS stop_order
+                    FROM rec
+                ),
+                -- For each missed connection, the overshoot in seconds
+                missed_detail AS (
+                    SELECT station, dep_train, day_date,
+                           arr_actual - dep_actual AS overshoot_sec
+                    FROM connections WHERE missed = 1
+                ),
+                -- Local saves per (station, delta): missed connections where overshoot <= delta
+                local_saves AS (
+                    SELECT station, delta,
+                           COUNT(*) AS saved_local
+                    FROM missed_detail
+                    CROSS JOIN (VALUES (120),(180),(300)) AS d(delta)
+                    WHERE overshoot_sec > 0 AND overshoot_sec <= delta
+                    GROUP BY station, delta
+                ),
+                -- Only delay trains from connections actually SAVED by this delta
+                -- (targeted holding, not blanket schedule change)
+                dep_trains_at_station AS (
+                    SELECT DISTINCT md.station AS origin_station, md.dep_train,
+                           md.day_date, d.delta
+                    FROM missed_detail md
+                    CROSS JOIN (VALUES (120),(180),(300)) AS d(delta)
+                    WHERE md.overshoot_sec > 0 AND md.overshoot_sec <= d.delta
+                ),
+                -- Find downstream stations for each (dep_train, day, origin_station, delta)
+                downstream AS (
+                    SELECT dt.origin_station, dt.dep_train, dt.day_date, dt.delta,
+                           tr.station AS downstream_station
+                    FROM dep_trains_at_station dt
+                    JOIN train_route tr ON dt.dep_train = tr.train_no AND dt.day_date = tr.day_date
+                    JOIN train_route tr_origin ON dt.dep_train = tr_origin.train_no
+                         AND dt.day_date = tr_origin.day_date AND tr_origin.station = dt.origin_station
+                    WHERE tr.stop_order > tr_origin.stop_order
+                ),
+                -- At downstream stations, connections where the propagated train ARRIVES
+                -- margin = dep_actual - arr_actual; if margin > 0 and margin <= delta → new miss
+                downstream_arr_impact AS (
+                    SELECT ds.origin_station, ds.delta,
+                           COUNT(*) FILTER (
+                               WHERE c.missed = 0
+                               AND (c.dep_actual - c.arr_actual) > 0
+                               AND (c.dep_actual - c.arr_actual) <= ds.delta
+                           ) AS new_misses_downstream
+                    FROM downstream ds
+                    JOIN connections c ON c.station = ds.downstream_station
+                         AND c.arr_train = ds.dep_train AND c.day_date = ds.day_date
+                    GROUP BY ds.origin_station, ds.delta
+                ),
+                -- At downstream stations, connections where the propagated train DEPARTS
+                -- if missed=1 and |margin| <= delta → saved (train departs later = more time)
+                downstream_dep_impact AS (
+                    SELECT ds.origin_station, ds.delta,
+                           COUNT(*) FILTER (
+                               WHERE c.missed = 1
+                               AND (c.arr_actual - c.dep_actual) > 0
+                               AND (c.arr_actual - c.dep_actual) <= ds.delta
+                           ) AS saved_downstream
+                    FROM downstream ds
+                    JOIN connections c ON c.station = ds.downstream_station
+                         AND c.dep_train = ds.dep_train AND c.day_date = ds.day_date
+                    GROUP BY ds.origin_station, ds.delta
+                )
+                SELECT
+                    COALESCE(ls.station, da.origin_station, dd.origin_station) AS station,
+                    COALESCE(ls.delta, da.delta, dd.delta) AS delta,
+                    COALESCE(ls.saved_local, 0) AS saved_local,
+                    COALESCE(da.new_misses_downstream, 0) AS new_misses_downstream,
+                    COALESCE(dd.saved_downstream, 0) AS saved_downstream
+                FROM local_saves ls
+                FULL OUTER JOIN downstream_arr_impact da ON ls.station = da.origin_station AND ls.delta = da.delta
+                FULL OUTER JOIN downstream_dep_impact dd ON COALESCE(ls.station, da.origin_station) = dd.origin_station
+                     AND COALESCE(ls.delta, da.delta) = dd.delta
             """).fetchdf()
-            if not opt_stops.empty:
-                all_opt_stops.append(opt_stops)
+
+            # 4. Quick wins: specific train pairs missed by <120s
+            quick_wins_chunk = con.execute("""
+                SELECT station, arr_train, dep_train,
+                       COUNT(*) AS n_missed,
+                       AVG(arr_actual - dep_actual) AS avg_overshoot_sec
+                FROM connections
+                WHERE missed = 1 AND arr_actual - dep_actual <= 120
+                GROUP BY station, arr_train, dep_train
+            """).fetchdf()
+
+            # Pack into one dict-of-dataframes for accumulation
+            chunk_opt = {
+                "buf_sens": buf_sens,
+                "barely": barely,
+                "opt_result": opt_result,
+                "quick_wins": quick_wins_chunk,
+            }
+            all_opt_data.append(chunk_opt)
 
             con.close()  # Free DuckDB memory for this chunk
 
@@ -2064,184 +2165,105 @@ async def api_missed_report(
 
         # ---- Network-aware optimization analysis ----
         optimization = None
-        if all_opt_connections and all_opt_stops:
-            opt_df = pd.concat(all_opt_connections, ignore_index=True)
-            stops_df = pd.concat(all_opt_stops, ignore_index=True)
-            del all_opt_connections, all_opt_stops
-
-            # --- 1. Buffer sensitivity curve (system-wide) ---
-            # For each virtual buffer (1..20 min), count how many connections
-            # would be missed vs the current min_transfer
-            buffer_curve = []
-            for buf_min in range(1, 21):
-                buf_sec = buf_min * 60
-                # A connection is valid if gap >= buf_sec and gap <= max_transfer_sec
-                valid = opt_df[(opt_df["gap"] >= buf_sec) & (opt_df["gap"] <= max_transfer_sec)]
-                total = len(valid)
-                missed = int(valid["missed"].sum())
-                buffer_curve.append({
-                    "buffer_min": buf_min,
-                    "planned": total,
-                    "missed": missed,
-                    "pct": round(missed / max(total, 1) * 100, 2),
-                })
-
-            # --- 2. Quick wins: connections barely missed (overshoot < 3 min) ---
-            missed_df = opt_df[opt_df["missed"] == 1].copy()
-            if not missed_df.empty:
-                missed_df["overshoot_sec"] = missed_df["arr_actual"] - missed_df["dep_actual"]
-                barely_missed = missed_df[missed_df["overshoot_sec"] <= 180]
-                barely_pct = round(len(barely_missed) / max(len(missed_df), 1) * 100, 1)
-            else:
-                barely_pct = 0.0
-
-            # --- 3. Network-aware per-station recommendations ---
-            # For each station with high miss count, simulate adding δ buffer:
-            # - Benefit: connections at this station that were missed with margin < δ are saved
-            # - Cost: departing trains leave δ later → arrive δ later downstream → new misses
-            #
-            # Build train downstream lookup: for each (train, day, station),
-            # which later stations does this train visit?
-            stops_df = stops_df.sort_values(["train_no", "day_date", "stop_order"])
-
-            # For efficiency, pre-build a lookup: (train, day) -> list of (station, stop_order, arr_actual, dep_actual)
-            train_stops_grouped = stops_df.groupby(["train_no", "day_date"]).apply(
-                lambda g: list(zip(g["station"], g["stop_order"], g["actual_arr"], g["actual_dep"])),
-                include_groups=False
-            ).to_dict()
-
-            # Build connection lookup: (station, day, arriving_train) -> list of (dep_train, margin_sec, missed)
-            # This tells us: at station S on day D, if arr_train T arrives δ later,
-            # which connections are affected?
-            conn_by_arr = {}
-            for _, row in opt_df.iterrows():
-                key = (row["station"], row["day_date"], row["arr_train"])
-                if key not in conn_by_arr:
-                    conn_by_arr[key] = []
-                conn_by_arr[key].append({
-                    "margin": row["margin_sec"],  # dep_actual - arr_actual; negative = missed
-                    "missed": int(row["missed"]),
-                })
-
-            # Also: (station, day, dep_train) -> list of connections where this is the departing train
-            conn_by_dep = {}
-            for _, row in opt_df.iterrows():
-                key = (row["station"], row["day_date"], row["dep_train"])
-                if key not in conn_by_dep:
-                    conn_by_dep[key] = []
-                conn_by_dep[key].append({
-                    "margin": row["margin_sec"],
-                    "missed": int(row["missed"]),
-                })
-
-            # Get top stations by missed count
-            station_missed = opt_df[opt_df["missed"] == 1].groupby("station").size().sort_values(ascending=False)
-            top_stations = station_missed.head(15).index.tolist()
-
-            recommendations = []
-            for station in top_stations:
-                st_conns = opt_df[opt_df["station"] == station]
-                st_missed = st_conns[st_conns["missed"] == 1]
-                if st_missed.empty:
-                    continue
-
-                best_delta = None
-                best_net = -999999
-
-                for delta_min in [1, 2, 3, 5]:
-                    delta_sec = delta_min * 60
-                    # BENEFIT: at this station, missed connections where overshoot < delta are saved
-                    saved = 0
-                    for _, mc in st_missed.iterrows():
-                        overshoot = mc["arr_actual"] - mc["dep_actual"]
-                        if 0 < overshoot <= delta_sec:
-                            saved += 1
-
-                    # COST: departing trains at this station depart delta later
-                    # → they arrive delta later at downstream stations
-                    # → connections where those trains are ARRIVING at downstream stations get worse
-                    new_misses = 0
-                    # But also BENEFIT downstream: connections where those trains are DEPARTING
-                    # at downstream stations get MORE buffer (train departs later = more time for arrivals)
-                    downstream_saves = 0
-
-                    # Get unique departing trains at this station that are involved in missed connections
-                    dep_trains = st_missed["dep_train"].unique()
-                    for dep_tn in dep_trains:
-                        # For each day this train runs through this station
-                        days = st_missed[st_missed["dep_train"] == dep_tn]["day_date"].unique()
-                        for day in days:
-                            route = train_stops_grouped.get((dep_tn, day), [])
-                            # Find this station in the route
-                            found = False
-                            for stn, order, arr_act, dep_act in route:
-                                if stn == station:
-                                    found = True
-                                    continue
-                                if not found:
-                                    continue
-                                # This is a DOWNSTREAM station
-                                # The train arrives delta_sec later here
-
-                                # As arriving train: connections get worse
-                                arr_conns = conn_by_arr.get((stn, day, dep_tn), [])
-                                for ac in arr_conns:
-                                    if ac["missed"] == 0 and ac["margin"] <= delta_sec:
-                                        # This connection was made but margin < delta → now missed
-                                        new_misses += 1
-
-                                # As departing train: connections get better
-                                dep_conns = conn_by_dep.get((stn, day, dep_tn), [])
-                                for dc in dep_conns:
-                                    if dc["missed"] == 1 and dc["margin"] < 0 and abs(dc["margin"]) <= delta_sec:
-                                        # Was missed, but adding delta to dep gives enough margin
-                                        downstream_saves += 1
-
-                    net = saved + downstream_saves - new_misses
-                    if net > best_net:
-                        best_net = net
-                        best_delta = {
-                            "delta_min": delta_min,
-                            "saved_local": saved,
-                            "new_misses_downstream": new_misses,
-                            "saved_downstream": downstream_saves,
-                            "net_benefit": net,
-                        }
-
-                if best_delta and best_delta["net_benefit"] > 0:
-                    total_missed_here = len(st_missed)
-                    recommendations.append({
-                        "station": station,
-                        "total_missed": total_missed_here,
-                        "total_planned": len(st_conns),
-                        "pct_missed": round(total_missed_here / max(len(st_conns), 1) * 100, 1),
-                        **best_delta,
-                        "net_pct_of_station": round(best_delta["net_benefit"] / max(total_missed_here, 1) * 100, 1),
+        if all_opt_data:
+            # Aggregate per-chunk DuckDB results — no large DataFrames needed
+            # 1. Buffer sensitivity: sum planned/missed per buffer_min across chunks
+            buf_parts = [c["buf_sens"] for c in all_opt_data if not c["buf_sens"].empty]
+            if buf_parts:
+                buf_all = pd.concat(buf_parts, ignore_index=True)
+                buf_agg = buf_all.groupby("buffer_min").agg(
+                    planned=("planned", "sum"), missed=("missed", "sum")
+                ).reset_index().sort_values("buffer_min")
+                buffer_curve = []
+                for _, row in buf_agg.iterrows():
+                    p, m = int(row["planned"]), int(row["missed"])
+                    buffer_curve.append({
+                        "buffer_min": int(row["buffer_min"]),
+                        "planned": p, "missed": m,
+                        "pct": round(m / max(p, 1) * 100, 2),
                     })
+                del buf_all, buf_agg
+            else:
+                buffer_curve = []
+
+            # 2. Barely missed percentage
+            total_barely = sum(c["barely"][0] for c in all_opt_data if c["barely"])
+            total_all_missed = sum(c["barely"][1] for c in all_opt_data if c["barely"])
+            barely_pct = round(total_barely / max(total_all_missed, 1) * 100, 1)
+
+            # 3. Per-station network simulation: aggregate opt_result across chunks
+            opt_parts = [c["opt_result"] for c in all_opt_data if not c["opt_result"].empty]
+            recommendations = []
+            if opt_parts:
+                opt_all = pd.concat(opt_parts, ignore_index=True)
+                opt_agg = opt_all.groupby(["station", "delta"]).agg(
+                    saved_local=("saved_local", "sum"),
+                    new_misses_downstream=("new_misses_downstream", "sum"),
+                    saved_downstream=("saved_downstream", "sum"),
+                ).reset_index()
+                opt_agg["net_benefit"] = (
+                    opt_agg["saved_local"] + opt_agg["saved_downstream"]
+                    - opt_agg["new_misses_downstream"]
+                )
+                del opt_all
+
+                # Rank stations by impact score (missed * sqrt(pct/100))
+                station_impact = {}
+                for stn in acc_missed:
+                    m = acc_missed[stn]
+                    p = acc_planned.get(stn, 0)
+                    pct = m / max(p, 1) * 100
+                    station_impact[stn] = m * math.sqrt(pct / 100)
+                top_stations = sorted(station_impact, key=lambda s: -station_impact[s])[:15]
+
+                # For each top station, pick best delta by net_benefit
+                for stn in top_stations:
+                    stn_rows = opt_agg[opt_agg["station"] == stn]
+                    if stn_rows.empty:
+                        continue
+                    best_row = stn_rows.loc[stn_rows["net_benefit"].idxmax()]
+                    net = int(best_row["net_benefit"])
+                    if net <= 0:
+                        continue
+                    total_missed_here = acc_missed.get(stn, 0)
+                    total_planned_here = acc_planned.get(stn, 0)
+                    recommendations.append({
+                        "station": stn,
+                        "total_missed": total_missed_here,
+                        "total_planned": total_planned_here,
+                        "pct_missed": round(total_missed_here / max(total_planned_here, 1) * 100, 1),
+                        "delta_min": int(best_row["delta"]) // 60,
+                        "saved_local": int(best_row["saved_local"]),
+                        "new_misses_downstream": int(best_row["new_misses_downstream"]),
+                        "saved_downstream": int(best_row["saved_downstream"]),
+                        "net_benefit": net,
+                        "net_pct_of_station": round(net / max(total_missed_here, 1) * 100, 1),
+                    })
+                del opt_agg
 
             recommendations.sort(key=lambda x: -x["net_benefit"])
 
-            # --- 4. System-wide summary ---
-            total_system_missed = int(opt_df["missed"].sum())
-            total_net_saved = sum(r["net_benefit"] for r in recommendations[:10])
-
-            # Quick wins detail: top connections barely missed
+            # 4. Quick wins: aggregate across chunks
+            qw_parts = [c["quick_wins"] for c in all_opt_data if not c["quick_wins"].empty]
             quick_wins = []
-            if not missed_df.empty and "overshoot_sec" in missed_df.columns:
-                barely = missed_df[missed_df["overshoot_sec"] <= 120]  # within 2 min
-                if not barely.empty:
-                    qw_grouped = barely.groupby(["station", "arr_train", "dep_train"]).agg(
-                        count=("missed", "sum"),
-                        avg_overshoot=("overshoot_sec", "mean"),
-                    ).reset_index().sort_values("count", ascending=False).head(10)
-                    for _, qw in qw_grouped.iterrows():
-                        quick_wins.append({
-                            "station": qw["station"],
-                            "arr_train": qw["arr_train"],
-                            "dep_train": qw["dep_train"],
-                            "count": int(qw["count"]),
-                            "avg_overshoot_sec": round(float(qw["avg_overshoot"]), 0),
-                        })
+            if qw_parts:
+                qw_all = pd.concat(qw_parts, ignore_index=True)
+                qw_agg = qw_all.groupby(["station", "arr_train", "dep_train"]).agg(
+                    n_missed=("n_missed", "sum"),
+                    avg_overshoot_sec=("avg_overshoot_sec", "mean"),
+                ).reset_index().sort_values("n_missed", ascending=False).head(10)
+                for _, qw in qw_agg.iterrows():
+                    quick_wins.append({
+                        "station": qw["station"],
+                        "arr_train": qw["arr_train"],
+                        "dep_train": qw["dep_train"],
+                        "count": int(qw["n_missed"]),
+                        "avg_overshoot_sec": round(float(qw["avg_overshoot_sec"]), 0),
+                    })
+                del qw_all, qw_agg
+
+            total_system_missed = sum(acc_missed.values())
+            total_net_saved = sum(r["net_benefit"] for r in recommendations[:10])
 
             optimization = {
                 "buffer_curve": buffer_curve,
@@ -2252,12 +2274,8 @@ async def api_missed_report(
                 "total_net_saveable": total_net_saved,
                 "net_saveable_pct": round(total_net_saved / max(total_system_missed, 1) * 100, 1),
             }
-            del opt_df, stops_df
-        else:
-            if all_opt_connections:
-                del all_opt_connections
-            if all_opt_stops:
-                del all_opt_stops
+            del all_opt_data
+
 
         # ---- Build response ----
         if not station_coords:
