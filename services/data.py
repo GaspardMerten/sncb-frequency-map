@@ -551,6 +551,129 @@ def load_duration_data(
     }
 
 
+
+def _build_commercial_stops(feed, station_coords: dict[str, dict]) -> dict[str, set[str]]:
+    """Build {UPPER_STATION_NL: set[train_no]} for commercial stops from GTFS.
+
+    Uses coordinate matching to map GTFS French names → Infrabel Dutch names.
+    Only includes stops where pickup_type=0 or drop_off_type=0 (actual passenger stops).
+    """
+    import math
+    import polars as pl
+
+    st = feed.stop_times
+    trips = feed.trips
+    stops = feed.stops
+
+    # 1. Filter to commercial stops (passenger pickup or dropoff)
+    commercial = st.filter(
+        (pl.col("pickup_type") == 0) | (pl.col("drop_off_type") == 0)
+    )
+
+    # 2. Join with trips to get train number
+    commercial = commercial.join(
+        trips.select(["trip_id", "trip_short_name"]), on="trip_id"
+    )
+
+    # 3. Resolve stop_id → parent station name
+    stop_parent = stops.select(["stop_id", "parent_station", "stop_name"])
+    parents = stops.filter(pl.col("location_type") == 1).select(
+        pl.col("stop_id").alias("pid"), pl.col("stop_name").alias("parent_name")
+    )
+    stop_parent = stop_parent.join(parents, left_on="parent_station", right_on="pid", how="left")
+    stop_parent = stop_parent.with_columns(
+        pl.coalesce(["parent_name", "stop_name"]).alias("station_name")
+    )
+    commercial = commercial.join(
+        stop_parent.select(["stop_id", "station_name"]), on="stop_id"
+    )
+
+    # 4. Build GTFS station → set[train_no]
+    gtfs_trains: dict[str, set[str]] = {}
+    for stn, tn in commercial.select(["station_name", "trip_short_name"]).unique().iter_rows():
+        gtfs_trains.setdefault(stn, set()).add(tn)
+
+    # 5. Coordinate-match GTFS stations → Infrabel Dutch names
+    parents_with_coords = stops.filter(pl.col("location_type") == 1).select(
+        ["stop_name", "stop_lat", "stop_lon"]
+    )
+    gtfs_list = [
+        (row[0], float(row[1]), float(row[2]))
+        for row in parents_with_coords.iter_rows()
+    ]
+
+    def _haversine_m(lat1, lon1, lat2, lon2):
+        R = 6371000
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (math.sin(dlat / 2) ** 2
+             + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+             * math.sin(dlon / 2) ** 2)
+        return R * 2 * math.asin(math.sqrt(a))
+
+    # Map Infrabel station name → closest GTFS station (within 1km)
+    result: dict[str, set[str]] = {}
+    for infra_name, coords in station_coords.items():
+        lat, lon = coords["lat"], coords["lon"]
+        best_dist = 1000
+        best_gtfs = None
+        for gname, glat, glon in gtfs_list:
+            d = _haversine_m(lat, lon, glat, glon)
+            if d < best_dist:
+                best_dist = d
+                best_gtfs = gname
+        if best_gtfs and best_gtfs in gtfs_trains:
+            result[infra_name] = gtfs_trains[best_gtfs]
+
+    return result
+
+
+@cached(ttl=86400)
+def load_commercial_stops(month_ts: int) -> dict[str, set[str]]:
+    """Return {UPPER_STATION_NL: set[train_no]} of commercial stops for a month.
+
+    Fetches the GTFS feed + operational points for that month, then builds
+    the mapping. Cached for 24h since GTFS doesn't change within a month.
+    """
+    try:
+        feed = fetch_gtfs(month_ts, TOKEN)
+    except Exception:
+        logger.warning("Failed to fetch GTFS for ts=%s, skipping commercial stop filter", month_ts)
+        return {}
+    # Need station_coords for the coord matching
+    op_points = _safe_fetch(fetch_operational_points, month_ts, TOKEN)
+    station_coords: dict[str, dict] = {}
+    if op_points and "features" in op_points:
+        for feat in op_points["features"]:
+            props = feat.get("properties") or {}
+            name = (props.get("longnamedutch") or "").strip().upper()
+            if not name:
+                continue
+            pt = props.get("geo_point_2d") or {}
+            lat, lon = pt.get("lat"), pt.get("lon")
+            if lat and lon:
+                station_coords[name] = {"lat": lat, "lon": lon}
+    if not station_coords:
+        return {}
+    return _build_commercial_stops(feed, station_coords)
+
+
+def filter_passthrough_records(records: list[dict], commercial_stops: dict[str, set[str]]) -> list[dict]:
+    """Filter out records where the train doesn't commercially stop at the station.
+
+    If commercial_stops is empty (GTFS unavailable), returns all records unchanged.
+    """
+    if not commercial_stops:
+        return records
+    return [
+        r for r in records
+        if str(r.get("train_no", "")) in commercial_stops.get(
+            (r.get("ptcar_lg_nm_nl") or "").strip().upper(), set()
+        )
+    ]
+
+
+
 @cached(ttl=3600)
 def load_punctuality_data(target_date: date) -> dict:
     """Load punctuality data for a single date."""

@@ -36,6 +36,8 @@ from logic.rendering import _get_belgium_border
 from logic.shared import load_provinces_geojson, noon_timestamp
 
 from services.data import (
+    filter_passthrough_records,
+    load_commercial_stops,
     load_connectivity_data,
     load_duration_data,
     load_gtfs_data,
@@ -227,11 +229,14 @@ async def api_punctuality(
     else:
         td = date.today() - timedelta(days=2)
 
-    data = await asyncio.to_thread(load_punctuality_data, td, (hour_start, hour_end))
+    data = await asyncio.to_thread(load_punctuality_data, td)
     if "error" in data:
         return JSONResponse(content={"error": data["error"]})
 
-    records = data["records"]
+    # Filter out pass-through records using GTFS commercial stops
+    _month_ts = noon_timestamp(td.year, td.month, 15)
+    _commercial = load_commercial_stops(_month_ts)
+    records = filter_passthrough_records(data["records"], _commercial)
     station_coords = data["station_coords"]
 
     delay_col = "delay_dep" if metric == "departure" else "delay_arr"
@@ -853,6 +858,12 @@ async def api_propagation(
 
         prefetch_punctuality(list(_date_range(start_date, end_date)))
 
+        # Load commercial stop filter
+        _commercial_stops: dict[str, set[str]] = {}
+        for _m_ts in {noon_timestamp(d.year, d.month, 15) for d in _date_range(start_date, end_date)}:
+            for stn, trains in load_commercial_stops(_m_ts).items():
+                _commercial_stops.setdefault(stn, set()).update(trains)
+
         for d in _date_range(start_date, end_date):
             try:
                 data = load_punctuality_data(d)
@@ -1206,7 +1217,7 @@ async def api_missed(
             data = load_punctuality_data(d)
             if "error" in data:
                 continue
-            records = data["records"]
+            records = filter_passthrough_records(data["records"], _commercial_stops)
             if not records:
                 continue
 
@@ -1544,6 +1555,17 @@ async def api_missed_report(
             WHERE d.planned - a.planned BETWEEN {min_transfer_sec} AND {max_transfer_sec}
         """
 
+        # Pre-load commercial stop filter (one GTFS per month in range)
+        _commercial_stops: dict[str, set[str]] = {}
+        _seen_months: set[int] = set()
+        for d in all_dates:
+            month_ts = noon_timestamp(d.year, d.month, 15)
+            if month_ts not in _seen_months:
+                _seen_months.add(month_ts)
+                cs = load_commercial_stops(month_ts)
+                for stn, trains in cs.items():
+                    _commercial_stops.setdefault(stn, set()).update(trains)
+
         for ci, chunk_dates in enumerate(chunks):
             # Fetch this chunk's data (parallel within chunk)
             _base = _days_fetched
@@ -1563,7 +1585,7 @@ async def api_missed_report(
                     continue
                 if not station_coords:
                     station_coords = data.get("station_coords", {})
-                recs = data["records"]
+                recs = filter_passthrough_records(data["records"], _commercial_stops)
                 if not recs:
                     continue
                 day_df = pd.DataFrame(recs)
