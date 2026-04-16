@@ -14,9 +14,19 @@ load_dotenv(_dir / ".env")
 
 app = FastAPI(title="MobilityTwin", docs_url="/docs")
 
-from routers import api  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from routers import api, chat  # noqa: E402
 
 app.include_router(api.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 
 # Serve compiled React frontend
 if _frontend_dist.is_dir():
@@ -27,15 +37,8 @@ if _frontend_dist.is_dir():
         return FileResponse(_frontend_dist / "index.html")
 else:
     # Fallback: serve legacy Jinja templates when frontend is not built
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.templating import Jinja2Templates
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
     app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
     templates = Jinja2Templates(directory=_dir / "templates")
 

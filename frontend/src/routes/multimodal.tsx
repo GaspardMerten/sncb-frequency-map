@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { colorToRGBA, heatmapLayer, choroplethLayer } from "@/lib/layers";
+import { tooltipBox } from "@/lib/tooltip";
 import { fetchApi } from "@/lib/api";
 import { fmt, today } from "@/lib/utils";
 import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
@@ -307,7 +308,24 @@ function MultimodalPage() {
             <MetricCard label="Address" value={data.geocoded_address} />
           </div>
           <div className="space-y-2">
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]"
+              getTooltip={({ object, layer }) => {
+                if (!object || !layer) return null;
+                const id = layer.id as string;
+                if (id === "multimodal-stations") {
+                  return tooltipBox(`<b>${object.name}</b><br/>${object.operator} — ${fmt(object.duration, 0)} min`);
+                }
+                if (id === "multimodal-origin" || id === "multimodal-origin-gradient") {
+                  return tooltipBox(`<b>Origin</b><br/>${data?.geocoded_address ?? ""}`);
+                }
+                if (id === "province-choropleth" || id === "region-choropleth") {
+                  const name = object.properties?.name ?? object.properties?.region ?? "";
+                  const val = object.properties?._value;
+                  return tooltipBox(`<b>${name}</b><br/>${val != null ? fmt(val, 1) + " min avg" : ""}`);
+                }
+                return null;
+              }}
+            />
             {viewMode === "stations" && (
               <div className="flex gap-4 text-[10px] text-muted-foreground">
                 {ALL_OPS.map((op) => (

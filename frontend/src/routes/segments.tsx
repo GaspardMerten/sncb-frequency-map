@@ -1,5 +1,5 @@
 import { createRoute } from "@tanstack/react-router";
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Train } from "lucide-react";
 import type { Layer } from "@deck.gl/core";
@@ -15,12 +15,13 @@ import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MapViewBar, mapViewTooltip } from "@/components/MapViewBar";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
-import { stationLayer, segmentLayer, choroplethLayer, colorToRGBA } from "@/lib/layers";
-import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
+import { stationLayer, segmentLayer, colorToRGBA } from "@/lib/layers";
+import { aggregateByProvince, getRegion } from "@/lib/geo";
+import { useMapView, makeTercileClassifier, type MetricOption } from "@/hooks/useMapView";
 
 export const segmentsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -35,12 +36,15 @@ interface SegmentData {
   error?: string;
 }
 
+const METRICS: MetricOption[] = [
+  { key: "freq", label: "Trains/day", accessor: (d: any) => d.freq },
+];
+
 function SegmentsPage() {
   const [filters, setFilters] = useState<Filters>({
     startDate: daysAgo(7), endDate: today(), weekdays: [0, 1, 2, 3, 4],
     excludePub: false, excludeSch: false, useHour: false, hourStart: 7, hourEnd: 19,
   });
-  const [viewMode, setViewMode] = useState<"segments" | "stations" | "provinces" | "regions">("segments");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
   const mapRef = useRef<DeckMapRef>(null);
 
@@ -57,11 +61,41 @@ function SegmentsPage() {
 
   const loadData = () => setQueryParams(filterParams(filters));
 
-  // Top 50 segments sorted by frequency descending
+  const sizeClassifier = useMemo(
+    () => makeTercileClassifier(data?.stations ?? [], (d) => d.freq),
+    [data],
+  );
+
+  const mapView = useMapView({
+    data: data?.stations ?? [],
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    getSize: sizeClassifier,
+    metrics: METRICS,
+    showGradient: true,
+    defaultViewMode: "segments",
+  });
+
+  const handleStationClick = useCallback((s: { lat: number; lon: number }) => {
+    mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 12 });
+  }, []);
+
+  const stationNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    if (data) for (const st of data.stations) m.set(st.id, st.name);
+    return m;
+  }, [data]);
+
+  const filteredSegments = useMemo(
+    () => (data ? data.segments.filter((s) => s.freq > 1) : []),
+    [data],
+  );
+
   const topSegments = useMemo(() => {
     if (!data) return [];
-    return [...data.segments].sort((a, b) => b.freq - a.freq).slice(0, 50);
-  }, [data]);
+    return [...filteredSegments].sort((a, b) => b.freq - a.freq).slice(0, 50);
+  }, [filteredSegments]);
 
   // Province data for bar charts
   const provinceData = useMemo(() => {
@@ -81,112 +115,63 @@ function SegmentsPage() {
       .sort((a, b) => b.avg - a.avg);
   }, [data, geoData]);
 
-  const layers = useMemo<Layer[]>(() => {
-    if (!data || data.error) return [];
+  // Segment + station dot layers for the custom "segments" view mode
+  const segmentViewLayers = useMemo<Layer[]>(() => {
+    if (mapView.viewMode !== "segments" || !data) return [];
+    const segs = filteredSegments;
+    if (!segs.length) return [];
+    const maxFreq = Math.max(...segs.map((s) => s.freq));
+    const maxStationFreq = Math.max(...data.stations.map((s) => s.freq), 1);
 
-    if (viewMode === "provinces" && geoData) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.freq,
-      );
-      const valueMap = new Map<string, number>();
-      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("province-choropleth", enriched, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode === "regions" && geoData) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.freq,
-      );
-      const regionAgg = new Map<string, { sum: number; count: number }>();
-      for (const [province, agg] of byProvince) {
-        const region = getRegion(province);
-        const existing = regionAgg.get(region);
-        if (existing) {
-          existing.sum += agg.sum;
-          existing.count += agg.count;
-        } else {
-          regionAgg.set(region, { sum: agg.sum, count: agg.count });
-        }
-      }
-      const valueMap = new Map<string, number>();
-      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("region-choropleth", regionGeo, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode === "segments") {
-      const segs = data.segments;
-      if (!segs.length) return [];
-      const maxFreq = Math.max(...segs.map((s) => s.freq));
-
-      const pathLayer = segmentLayer("segment-paths", segs, {
-        pathFn: (d) => d.coords.map(([lat, lon]) => [lon, lat] as [number, number]),
-        widthFn: (d) => 2 + (d.freq / maxFreq) * 4,
-        colorFn: (d) => colorToRGBA(d.freq / maxFreq),
-        widthMinPixels: 1,
-        widthMaxPixels: 10,
-      });
-
-      const dotLayer = stationLayer("segment-station-dots", data.stations, {
-        positionFn: (d) => [d.lon, d.lat],
-        radiusFn: () => 3,
-        colorFn: () => [8, 69, 148, 160],
-        radiusMinPixels: 2,
-        radiusMaxPixels: 6,
-        pickable: true,
-      });
-
-      return [pathLayer, dotLayer] as Layer[];
-    }
-
-    // viewMode === "stations"
-    const stations = data.stations;
-    if (!stations.length) return [];
-    const maxFreq = stations[0].freq;
-
-    const layer = stationLayer("station-circles", stations, {
-      positionFn: (d) => [d.lon, d.lat],
-      radiusFn: (d) => 4 + (d.freq / maxFreq) * 12,
+    const pathLayer = segmentLayer("segment-paths", segs, {
+      pathFn: (d) => d.coords.map(([lat, lon]) => [lon, lat] as [number, number]),
+      widthFn: (d) => 1 + (d.freq / maxFreq) * 10,
       colorFn: (d) => colorToRGBA(d.freq / maxFreq),
-      radiusScale: 1,
-      radiusMinPixels: 3,
-      radiusMaxPixels: 30,
+      widthMinPixels: 2,
+      widthMaxPixels: 16,
       pickable: true,
     });
 
-    return [layer] as Layer[];
-  }, [data, geoData, viewMode]);
+    const dotLayer = stationLayer("segment-station-dots", data.stations, {
+      positionFn: (d) => [d.lon, d.lat],
+      radiusFn: (d) => 2 + (d.freq / maxStationFreq) * 8,
+      colorFn: () => [8, 69, 148, 200],
+      radiusMinPixels: 2,
+      radiusMaxPixels: 14,
+      pickable: true,
+    });
+
+    return [pathLayer, dotLayer] as Layer[];
+  }, [data, filteredSegments, mapView.viewMode]);
+
+  // Station circles for the "stations" view mode
+  const stationViewLayers = useMemo<Layer[]>(() => {
+    if (!data || !mapView.filtered.length) return [];
+    const maxFreq = Math.max(...mapView.filtered.map((s) => s.freq), 1);
+
+    return [
+      stationLayer("station-circles", mapView.filtered, {
+        positionFn: (d) => [d.lon, d.lat],
+        radiusFn: (d) => 3 + (d.freq / maxFreq) * 18,
+        colorFn: (d) => colorToRGBA(d.freq / maxFreq),
+        radiusScale: 1,
+        radiusMinPixels: 3,
+        radiusMaxPixels: 40,
+        pickable: true,
+      }),
+    ] as Layer[];
+  }, [data, mapView.filtered]);
+
+  const layers = mapView.isOverlayView
+    ? mapView.overlayLayers
+    : mapView.viewMode === "segments"
+      ? segmentViewLayers
+      : stationViewLayers;
 
   return (
     <Layout
       sidebar={
         <>
-          <div>
-            <p className="text-[10px] font-semibold text-foreground/40 uppercase tracking-widest mb-2">View</p>
-            <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as typeof viewMode)}>
-              <TabsList className="w-full">
-                <TabsTrigger value="segments" className="flex-1">Segments</TabsTrigger>
-                <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
-                <TabsTrigger value="provinces" className="flex-1">Provinces</TabsTrigger>
-                <TabsTrigger value="regions" className="flex-1">Regions</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
           <FilterPanel filters={filters} onChange={setFilters} />
           <ApplyButton loading={isFetching} onClick={loadData} />
         </>
@@ -194,7 +179,7 @@ function SegmentsPage() {
     >
       {data && !data.error && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
-          <MetricCard label="Segments" value={fmt(data.segments.length)} />
+          <MetricCard label="Segments" value={fmt(filteredSegments.length)} />
           <MetricCard label="Stations" value={fmt(data.stations.length)} />
           <MetricCard label="Busiest" value={data.stations[0]?.name ?? "\u2014"} suffix="/day" />
           <MetricCard label="Avg Days" value={data.day_count} />
@@ -206,19 +191,59 @@ function SegmentsPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <div className="space-y-2">
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-14rem)]" />
-            <ColorLegend min="Low frequency" max="High frequency" />
+          <MapViewBar
+            viewMode={mapView.viewMode}
+            onViewModeChange={mapView.setViewMode}
+            sizeFilter={mapView.sizeFilter}
+            onSizeFilterChange={mapView.setSizeEnabled}
+            choroplethMetric={mapView.choroplethMetric}
+            onChoroplethMetricChange={mapView.setChoroplethMetric}
+            metrics={mapView.metrics}
+            showGradient={mapView.showGradient}
+            activeMetric={mapView.activeMetric}
+            isOverlayView={mapView.isOverlayView}
+            extraTabs={[{ value: "segments", label: "Segments", position: "before" }]}
+          />
+
+          <div className="space-y-2 mt-3">
+            <DeckMap
+              ref={mapRef}
+              layers={layers}
+              className="h-[calc(100vh-14rem)]"
+              getTooltip={(info) => {
+                const mv = mapViewTooltip(mapView.activeMetric, info);
+                if (mv) return mv;
+                const { object, layer } = info;
+                if (!object || !layer) return null;
+                const id = layer.id as string;
+                if (id === "segment-paths") {
+                  const [fromId, toId] = String(object.id ?? "").split("_");
+                  const from = stationNameById.get(fromId) ?? fromId ?? "?";
+                  const to = stationNameById.get(toId) ?? toId ?? "?";
+                  return {
+                    html: `<div style="font-size:12px"><b>${from} \u2192 ${to}</b><br/>${fmt(object.freq, 1)} trains/day</div>`,
+                    style: { backgroundColor: "rgba(255,255,255,0.95)", color: "#111", padding: "6px 8px", borderRadius: "8px", border: "1px solid #e5e7eb", boxShadow: "0 2px 8px rgba(0,0,0,0.12)" },
+                  };
+                }
+                if (id === "segment-station-dots" || id === "station-circles") {
+                  return {
+                    html: `<div style="font-size:12px"><b>${object.name ?? object.id}</b><br/>${fmt(object.freq, 1)} trains/day</div>`,
+                    style: { backgroundColor: "rgba(255,255,255,0.95)", color: "#111", padding: "6px 8px", borderRadius: "8px", border: "1px solid #e5e7eb", boxShadow: "0 2px 8px rgba(0,0,0,0.12)" },
+                  };
+                }
+                return null;
+              }}
+            />
+            {!mapView.isOverlayView && <ColorLegend min="Low frequency" max="High frequency" />}
           </div>
 
-          {(viewMode === "provinces" || viewMode === "regions") && provinceData.length > 0 && (
+          {(mapView.viewMode === "provinces" || mapView.viewMode === "regions") && provinceData.length > 0 && (
             <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm mt-4 animate-slide-up">
               <h3 className="text-sm font-semibold text-foreground mb-4">
-                {viewMode === "provinces" ? "Avg Frequency by Province" : "Avg Frequency by Region"}
+                {mapView.viewMode === "provinces" ? "Avg Frequency by Province" : "Avg Frequency by Region"}
               </h3>
               <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={viewMode === "regions" ? provinceData.reduce((acc, p) => {
-                  // Group by region for region view
+                <BarChart data={mapView.viewMode === "regions" ? provinceData.reduce((acc, p) => {
                   const region = getRegion(p.fullName);
                   const existing = acc.find((r) => r.name === region);
                   if (existing) {
@@ -242,7 +267,7 @@ function SegmentsPage() {
             </div>
           )}
 
-          {viewMode === "segments" && topSegments.length > 0 && (
+          {mapView.viewMode === "segments" && topSegments.length > 0 && (
             <div className="mt-4 animate-slide-up">
               <DataTable
                 title="Top Segments by Frequency"
@@ -250,20 +275,21 @@ function SegmentsPage() {
                 data={topSegments}
                 columns={[
                   { header: "#", accessor: (_, i) => i + 1, className: "text-muted-foreground w-10" },
-                  { header: "From", accessor: (s) => <span className="font-medium">{s.id.split("_")[0]}</span> },
-                  { header: "To", accessor: (s) => <span className="font-medium">{s.id.split("_")[1]}</span> },
+                  { header: "From", accessor: (s) => <span className="font-medium">{stationNameById.get(s.id.split("_")[0]) ?? s.id.split("_")[0]}</span> },
+                  { header: "To", accessor: (s) => <span className="font-medium">{stationNameById.get(s.id.split("_")[1]) ?? s.id.split("_")[1]}</span> },
                   { header: "Trains/day", accessor: (s) => <span className="font-semibold text-primary">{fmt(s.freq, 1)}</span>, align: "right" },
                 ]}
               />
             </div>
           )}
 
-          {viewMode === "stations" && (
+          {mapView.viewMode === "stations" && (
             <div className="mt-4 animate-slide-up">
               <DataTable
                 title="Top Stations by Frequency"
                 keyFn={(s) => s.id}
                 data={data.stations}
+                onRowClick={handleStationClick}
                 columns={[
                   { header: "#", accessor: (_, i) => i + 1, className: "text-muted-foreground w-10" },
                   { header: "Station", accessor: (s) => <span className="font-medium">{s.name}</span> },

@@ -15,15 +15,17 @@ import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { MapViewBar, mapViewTooltip } from "@/components/MapViewBar";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectOption } from "@/components/ui/select";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
-import { stationLayer, segmentLayer, choroplethLayer, colorToRGBA } from "@/lib/layers";
-import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
+import { ScatterplotLayer } from "@deck.gl/layers";
+import { stationLayer, colorToRGBA } from "@/lib/layers";
+import { aggregateByProvince } from "@/lib/geo";
+import { useMapView, makeTercileClassifier, type MetricOption } from "@/hooks/useMapView";
 
 export const reachRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -39,6 +41,10 @@ interface ReachData {
   stations: ReachStation[]; max_reachable: number; avg_reachable: number; median_reachable: number; error?: string;
 }
 
+const METRICS: MetricOption[] = [
+  { key: "reachable", label: "Reachable stations", accessor: (d: ReachStation) => d.reachable },
+];
+
 function ReachPage() {
   const [filters, setFilters] = useState<Filters>({
     startDate: daysAgo(7), endDate: today(), weekdays: [0, 1, 2, 3, 4],
@@ -50,7 +56,6 @@ function ReachPage() {
   const [maxTransfers, setMaxTransfers] = useState(3);
   const [minTransferTime, setMinTransferTime] = useState(5);
   const [selectedStation, setSelectedStation] = useState("");
-  const [viewMode, setViewMode] = useState("stations");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
   const mapRef = useRef<DeckMapRef>(null);
 
@@ -70,154 +75,102 @@ function ReachPage() {
     dep_end: depEnd, max_transfers: maxTransfers, min_transfer_time: minTransferTime,
   });
 
+  const sizeClassifier = useMemo(
+    () => makeTercileClassifier(data?.stations ?? [], (d) => d.reachable),
+    [data],
+  );
+
+  const mapView = useMapView<ReachStation>({
+    data: data?.stations ?? [],
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    getSize: sizeClassifier,
+    metrics: METRICS,
+    showGradient: true,
+  });
+
   const handleSelectStation = useCallback((stationId: string) => {
     setSelectedStation(stationId);
     if (stationId && data) {
       const s = data.stations.find((x) => x.id === stationId);
-      if (s) {
-        mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 9 });
-      }
+      if (s) mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 9 });
     }
   }, [data]);
 
-  // Province aggregation for bar charts
   const provinceData = useMemo(() => {
     if (!data || !geoData) return [];
     const byProvince = aggregateByProvince(
-      data.stations, geoData,
-      (d) => d.lon, (d) => d.lat, (d) => d.reachable,
+      data.stations, geoData, (d) => d.lon, (d) => d.lat, (d) => d.reachable,
     );
     return Array.from(byProvince.entries())
       .map(([name, agg]) => ({ name: name.length > 12 ? name.slice(0, 12) + "..." : name, fullName: name, avg: Math.round(agg.avg * 10) / 10, count: agg.count }))
       .sort((a, b) => b.avg - a.avg);
   }, [data, geoData]);
 
-  const layers = useMemo<Layer[]>(() => {
-    if (!data || data.error) return [];
-
-    if (viewMode === "provinces" && geoData) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.reachable,
-      );
-      const valueMap = new Map<string, number>();
-      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("reach-province-choropleth", enriched, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode === "regions" && geoData) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.reachable,
-      );
-      const regionAgg = new Map<string, { sum: number; count: number }>();
-      for (const [province, agg] of byProvince) {
-        const region = getRegion(province);
-        const existing = regionAgg.get(region);
-        if (existing) {
-          existing.sum += agg.sum;
-          existing.count += agg.count;
-        } else {
-          regionAgg.set(region, { sum: agg.sum, count: agg.count });
-        }
-      }
-      const valueMap = new Map<string, number>();
-      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("reach-region-choropleth", regionGeo, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode !== "stations") return [];
-
-    const stations = data.stations;
+  const stationLayers = useMemo<Layer[]>(() => {
+    const stations = mapView.filtered;
     if (!stations.length) return [];
-    const maxReach = Math.max(...stations.map((s) => s.reachable));
+    const reaches = stations.map((s) => s.reachable);
+    const maxReach = Math.max(...reaches);
+    const minReach = Math.min(...reaches);
+    const spread = Math.max(maxReach - minReach, 1);
+    const ratio = (d: ReachStation) => (d.reachable - minReach) / spread;
+
+    const selected = selectedStation ? stations.find((x) => x.id === selectedStation) : undefined;
+    const reachableNames = selected?.destinations
+      ? new Set(selected.destinations.map((d) => d.name))
+      : null;
 
     const result: Layer[] = [];
 
     result.push(
       stationLayer("reach-stations", stations, {
         positionFn: (d) => [d.lon, d.lat],
-        radiusFn: (d) => 4 + (d.reachable / Math.max(maxReach, 1)) * 12,
-        colorFn: (d) => colorToRGBA(d.reachable / Math.max(maxReach, 1)),
+        radiusFn: (d) => 3 + ratio(d) * 18,
+        colorFn: (d) => {
+          const [r, g, b] = colorToRGBA(ratio(d));
+          if (reachableNames && d.id !== selectedStation && !reachableNames.has(d.name)) {
+            return [r, g, b, 20];
+          }
+          return [r, g, b, 230];
+        },
+        radiusScale: 1,
         radiusMinPixels: 3,
-        radiusMaxPixels: 30,
+        radiusMaxPixels: 40,
         pickable: true,
       }) as Layer,
     );
 
-    if (selectedStation) {
-      const s = stations.find((x) => x.id === selectedStation);
-      if (s) {
-        result.push(
-          stationLayer("reach-selected", [s], {
-            positionFn: (d) => [d.lon, d.lat],
-            radiusFn: () => 10,
-            colorFn: () => [227, 26, 28, 230],
-            radiusMinPixels: 8,
-            radiusMaxPixels: 16,
-            pickable: false,
-          }) as Layer,
-        );
-
-        if (s.destinations && s.destinations.length) {
-          // Draw route paths if available
-          const destsWithPath = s.destinations.filter((d) => d.path && d.path.length >= 2);
-          if (destsWithPath.length) {
-            result.push(
-              segmentLayer("reach-routes", destsWithPath, {
-                pathFn: (d) => d.path!.map(([lat, lon]) => [lon, lat] as [number, number]),
-                widthFn: () => 2,
-                colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60), 160),
-                widthMinPixels: 1,
-                widthMaxPixels: 6,
-              }) as Layer,
-            );
-          }
-
-          // Draw straight lines for destinations without path data
-          const destsWithoutPath = s.destinations.filter((d) => !d.path || d.path.length < 2);
-          if (destsWithoutPath.length) {
-            result.push(
-              segmentLayer("reach-routes-fallback", destsWithoutPath, {
-                pathFn: (d) => [[s.lon, s.lat], [d.lon, d.lat]],
-                widthFn: () => 1,
-                colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60), 100),
-                widthMinPixels: 1,
-                widthMaxPixels: 3,
-              }) as Layer,
-            );
-          }
-
-          result.push(
-            stationLayer("reach-destinations", s.destinations, {
-              positionFn: (d) => [d.lon, d.lat],
-              radiusFn: () => 5,
-              colorFn: (d) => colorToRGBA(d.time / (timeBudget * 60)),
-              radiusMinPixels: 4,
-              radiusMaxPixels: 12,
-              pickable: true,
-            }) as Layer,
-          );
-        }
-      }
+    if (selected) {
+      result.push(
+        new ScatterplotLayer({
+          id: "reach-selected-halo",
+          data: [selected],
+          getPosition: (d: ReachStation) => [d.lon, d.lat],
+          getRadius: 26, radiusUnits: "pixels",
+          getFillColor: [227, 26, 28, 60],
+          stroked: true, getLineColor: [227, 26, 28, 220], getLineWidth: 2, lineWidthUnits: "pixels",
+          pickable: false,
+        }) as unknown as Layer,
+      );
+      result.push(
+        new ScatterplotLayer({
+          id: "reach-selected",
+          data: [selected],
+          getPosition: (d: ReachStation) => [d.lon, d.lat],
+          getRadius: 12, radiusUnits: "pixels",
+          getFillColor: [227, 26, 28, 255],
+          stroked: true, getLineColor: [255, 255, 255, 255], getLineWidth: 3, lineWidthUnits: "pixels",
+          pickable: false,
+        }) as unknown as Layer,
+      );
     }
 
     return result;
-  }, [data, viewMode, selectedStation, timeBudget, geoData]);
+  }, [mapView.filtered, selectedStation, timeBudget]);
+
+  const layers = mapView.isOverlayView ? mapView.overlayLayers : stationLayers;
 
   return (
     <Layout
@@ -267,18 +220,47 @@ function ReachPage() {
 
       {data && !data.error && !isFetching && (
         <>
-          <Tabs value={viewMode} onValueChange={setViewMode} className="mb-4">
-            <TabsList>
-              <TabsTrigger value="stations">Stations</TabsTrigger>
-              <TabsTrigger value="provinces">Provinces</TabsTrigger>
-              <TabsTrigger value="regions">Regions</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <MapViewBar
+            viewMode={mapView.viewMode}
+            onViewModeChange={mapView.setViewMode}
+            sizeFilter={mapView.sizeFilter}
+            onSizeFilterChange={mapView.setSizeEnabled}
+            choroplethMetric={mapView.choroplethMetric}
+            onChoroplethMetricChange={mapView.setChoroplethMetric}
+            metrics={mapView.metrics}
+            showGradient={mapView.showGradient}
+            activeMetric={mapView.activeMetric}
+            isOverlayView={mapView.isOverlayView}
+          />
 
-          {viewMode === "stations" && (
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          {!mapView.isOverlayView && (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mt-3">
               <div className="xl:col-span-2 space-y-2">
-                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]" />
+                <DeckMap
+                  ref={mapRef} layers={layers} className="h-[calc(100vh-16rem)]"
+                  onClick={(info) => {
+                    if (info?.layer?.id === "reach-stations" && info.object) {
+                      setSelectedStation(info.object.id === selectedStation ? "" : info.object.id);
+                    } else if (!info?.object) {
+                      setSelectedStation("");
+                    }
+                  }}
+                  getTooltip={(info) => {
+                    const { object, layer } = info;
+                    if (!object || !layer) return null;
+                    const id = layer.id as string;
+                    if (id === "reach-stations") {
+                      const isSelected = object.id === selectedStation;
+                      const isReachable = selectedStation && data?.stations.find((s) => s.id === selectedStation)?.destinations?.some((d) => d.name === object.name);
+                      const badge = isSelected ? " (selected)" : isReachable ? " (reachable)" : "";
+                      return {
+                        html: `<div style="font-size:12px"><b>${object.name}</b>${badge}<br/>${fmt(object.reachable)} reachable stations</div>`,
+                        style: { backgroundColor: "rgba(255,255,255,0.95)", color: "#111", padding: "6px 8px", borderRadius: "8px", border: "1px solid #e5e7eb", boxShadow: "0 2px 8px rgba(0,0,0,0.12)" },
+                      };
+                    }
+                    return null;
+                  }}
+                />
                 <ColorLegend min="Few reachable" max="Many reachable" />
               </div>
               <div>
@@ -303,23 +285,21 @@ function ReachPage() {
             </div>
           )}
 
-          {(viewMode === "provinces" || viewMode === "regions") && (
-            <div className="space-y-4">
+          {mapView.isOverlayView && (
+            <div className="space-y-4 mt-3">
               <div className="space-y-2">
-                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-18rem)]" />
-                <ColorLegend min="Low avg reachable" max="High avg reachable" />
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-18rem)]"
+                  getTooltip={(info) => mapViewTooltip(mapView.activeMetric, info)}
+                />
               </div>
-              {viewMode === "provinces" && provinceData.length > 0 && (
+              {mapView.viewMode === "provinces" && provinceData.length > 0 && (
                 <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">
                   <h3 className="text-sm font-semibold text-foreground mb-4">Avg Reachable Stations by Province</h3>
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={provinceData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
                       <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" height={50} />
                       <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
-                      <Tooltip
-                        contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }}
-                        formatter={(value: number) => [`${value}`, "Avg reachable"]}
-                      />
+                      <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12, border: '1px solid var(--color-border)' }} formatter={(value: number) => [`${value}`, "Avg reachable"]} />
                       <Bar dataKey="avg" fill="oklch(0.55 0.15 250)" radius={[6, 6, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -331,7 +311,7 @@ function ReachPage() {
           <div className="mt-4">
             <MethodologyPanel>
               <p>Reachability is computed using a Breadth-First Search (BFS) on the GTFS timetable graph. For each station, the algorithm explores all trains departing within the departure window and follows connections (with configurable transfer penalties) until the time budget is exhausted.</p>
-              <p>The reachable count represents how many unique stations can be reached from each origin within the given time budget and transfer constraints. When a station is selected, route paths are drawn using infrastructure geometry where available, with straight-line fallbacks.</p>
+              <p>The reachable count represents how many unique stations can be reached from each origin within the given time budget and transfer constraints.</p>
             </MethodologyPanel>
           </div>
         </>

@@ -14,6 +14,7 @@ interface DeckMapProps {
   };
   className?: string;
   onClick?: (info: any) => void;
+  getTooltip?: (info: any) => string | { html: string; style?: any } | null;
 }
 
 export interface DeckMapRef {
@@ -31,7 +32,7 @@ const BASEMAP_STYLE =
   "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
 
 export const DeckMap = forwardRef<DeckMapRef, DeckMapProps>(
-  function DeckMap({ id, layers, initialViewState, className, onClick }, ref) {
+  function DeckMap({ id, layers, initialViewState, className, onClick, getTooltip }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<MapLibreMap | null>(null);
     const overlayRef = useRef<MapboxOverlay | null>(null);
@@ -64,6 +65,7 @@ export const DeckMap = forwardRef<DeckMapRef, DeckMapProps>(
       const overlay = new MapboxOverlay({
         layers: [],
         ...(onClick ? { onClick } : {}),
+        ...(getTooltip ? { getTooltip: getTooltip as any } : {}),
       });
 
       map.addControl(overlay as any);
@@ -81,8 +83,11 @@ export const DeckMap = forwardRef<DeckMapRef, DeckMapProps>(
     }, []);
 
     useEffect(() => {
-      overlayRef.current?.setProps({ layers });
-    }, [layers]);
+      overlayRef.current?.setProps({
+        layers,
+        ...(getTooltip ? { getTooltip: getTooltip as any } : {}),
+      });
+    }, [layers, getTooltip]);
 
     return (
       <div
@@ -92,7 +97,6 @@ export const DeckMap = forwardRef<DeckMapRef, DeckMapProps>(
           "w-full rounded-2xl border border-border/60 shadow-sm overflow-hidden",
           className,
         )}
-        style={{ height: "100%" }}
       />
     );
   },

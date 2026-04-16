@@ -10,6 +10,8 @@ import { accessibilityRoute } from "./routes/accessibility";
 import { propagationRoute } from "./routes/propagation";
 import { problematicRoute } from "./routes/problematic";
 import { missedRoute } from "./routes/missed";
+import { weatherRoute } from "./routes/weather";
+import { reportMissedRoute } from "./routes/report-missed";
 
 export const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -23,4 +25,6 @@ export const routeTree = rootRoute.addChildren([
   propagationRoute,
   problematicRoute,
   missedRoute,
+  weatherRoute,
+  reportMissedRoute,
 ]);

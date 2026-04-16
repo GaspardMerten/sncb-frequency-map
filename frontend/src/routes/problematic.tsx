@@ -156,7 +156,7 @@ function ProblematicPage() {
           {scatterDataByRelation.length > 0 && (
             <div className="rounded-2xl border border-border/50 bg-card p-5 shadow-sm mb-4 animate-slide-up">
               <h3 className="text-sm font-semibold mb-1 text-foreground">Late Rate vs Average Delay</h3>
-              <p className="text-[10px] text-muted-foreground mb-3">Color = train relation/line, bubble size = total stops observed</p>
+              <p className="text-[10px] text-muted-foreground mb-3">Each bubble is a train-station pair &middot; Color = relation/line &middot; Size = total stops observed</p>
               <ResponsiveContainer width="100%" height={360}>
                 <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
@@ -171,7 +171,8 @@ function ProblematicPage() {
                       return (
                         <div className="rounded-xl border border-border/50 bg-card px-3 py-2 text-xs shadow-lg">
                           <p className="font-semibold">{d.name}</p>
-                          <p className="text-muted-foreground">Late: {d.x}% | Avg: {d.y}m | Stops: {d.z}</p>
+                          <p>Late: <b>{d.x}%</b> &middot; Avg delay: <b>{d.y}m</b></p>
+                          <p className="text-muted-foreground">{d.z} stops observed</p>
                         </div>
                       );
                     }}
@@ -303,8 +304,10 @@ function ProblematicPage() {
 
           <div className="mt-4">
             <MethodologyPanel>
-              <p>For each date in the range, all punctuality records are grouped by (train number, station) pairs. Per pair per day: average delay, max delay, and percentage of late stops are computed.</p>
-              <p>These are then aggregated across days. Pairs observed fewer than the minimum days threshold are excluded. The scatter plot colors represent different train relations/lines, and bubble size is proportional to total stops observed. Select a pair to see its day-by-day delay trend.</p>
+              <p><b>% Late</b> — proportion of days where a train's average delay at a station exceeds the late threshold. A train that is 100% late was delayed every single day it ran.</p>
+              <p><b>Avg / Max delay</b> — the mean and peak delay (in minutes) across all observed days, capped at the configured ceiling to exclude extreme outliers.</p>
+              <p><b>Repeat offenders</b> — only train-station pairs seen on at least the minimum number of days are included. This filters out one-off disruptions and surfaces structurally problematic services.</p>
+              <p>The scatter plot groups pairs by train relation (e.g. IC Brussels-Ostend). Clusters in the top-right indicate lines that are both frequently and severely late. Select any pair to see its day-by-day trend.</p>
             </MethodologyPanel>
           </div>
         </>

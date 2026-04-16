@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { fetchApi } from "@/lib/api";
 import { fmt, daysAgo } from "@/lib/utils";
 import { stationLayer } from "@/lib/layers";
+import { tooltipBox } from "@/lib/tooltip";
 
 export const accessibilityRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -224,7 +225,15 @@ function AccessibilityPage() {
             {data.pct_30min != null && <MetricCard label="<= 30 min" value={data.pct_30min} suffix="%" />}
           </div>
 
-          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
+          <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]"
+            getTooltip={({ object, layer }) => {
+              if (!object || !layer) return null;
+              if (layer.id === "accessibility-stops") {
+                return tooltipBox(`<b>${object.name}</b><br/>Operator: ${object.operator}`);
+              }
+              return null;
+            }}
+          />
 
           {/* Operator legend + stops table for stations view */}
           {viewMode === "stations" && (

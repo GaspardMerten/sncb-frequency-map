@@ -1,5 +1,5 @@
 import { createRoute } from "@tanstack/react-router";
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Layer } from "@deck.gl/core";
 import { BarChart3 } from "lucide-react";
@@ -12,16 +12,18 @@ import { LoadingState } from "@/components/LoadingState";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
-import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { DataTable } from "@/components/DataTable";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
+import { MapViewBar } from "@/components/MapViewBar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
 import { stationLayer } from "@/lib/layers";
+import { tooltipBox } from "@/lib/tooltip";
+import { useMapView, type StationSize, type MetricOption } from "@/hooks/useMapView";
 
 export const connectivityRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -49,6 +51,18 @@ const SIZE_CSS: Record<string, string> = {
   big: "#d32f2f",
 };
 
+const METRICS: MetricOption[] = [
+  { key: "reachable", label: "Reachable stations", accessor: (d: Station) => d.reachable },
+  { key: "direct_freq", label: "Direct freq/h", accessor: (d: Station) => d.direct_freq, suffix: "/h" },
+  { key: "reach_km", label: "Cardinal reach (km)", accessor: (d: Station) => d.reach_km, suffix: " km" },
+];
+
+const SCATTER_TABS = [
+  { value: "ab", label: "Reachable vs Freq", xKey: "reachable", yKey: "direct_freq", zKey: "reach_km", xLabel: "Reachable stations", yLabel: "Direct freq/h", zLabel: "Cardinal reach (km)" },
+  { value: "bc", label: "Freq vs Reach", xKey: "direct_freq", yKey: "reach_km", zKey: "reachable", xLabel: "Direct freq/h", yLabel: "Cardinal reach (km)", zLabel: "Reachable stations" },
+  { value: "ac", label: "Reachable vs Reach", xKey: "reachable", yKey: "reach_km", zKey: "direct_freq", xLabel: "Reachable stations", yLabel: "Cardinal reach (km)", zLabel: "Direct freq/h" },
+] as const;
+
 function ConnectivityPage() {
   const [filters, setFilters] = useState<Filters>({
     startDate: daysAgo(7), endDate: today(), weekdays: [0, 1, 2, 3, 4],
@@ -58,9 +72,6 @@ function ConnectivityPage() {
   const [maxTransfers, setMaxTransfers] = useState(2);
   const [depStart, setDepStart] = useState(7);
   const [depEnd, setDepEnd] = useState(9);
-  const [showSmall, setShowSmall] = useState(true);
-  const [showMedium, setShowMedium] = useState(true);
-  const [showBig, setShowBig] = useState(true);
   const [scatterTab, setScatterTab] = useState("ab");
   const [sizeTab, setSizeTab] = useState("all");
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
@@ -72,29 +83,39 @@ function ConnectivityPage() {
     enabled: !!queryParams,
   });
 
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
   const loadData = () => setQueryParams({
     ...filterParams(filters), time_budget: timeBudget, max_transfers: maxTransfers,
     dep_start: depStart, dep_end: depEnd,
   });
 
-  const filteredStations = useMemo(() => {
-    if (!data) return [];
-    return data.stations.filter((s) =>
-      (s.size === "small" && showSmall) || (s.size === "medium" && showMedium) || (s.size === "big" && showBig)
-    );
-  }, [data, showSmall, showMedium, showBig]);
+  const mapView = useMapView<Station>({
+    data: data?.stations ?? [],
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    getSize: (d) => d.size as StationSize,
+    metrics: METRICS,
+  });
+
+  const handleStationClick = useCallback((s: Station) => {
+    mapRef.current?.flyTo({ longitude: s.lon, latitude: s.lat, zoom: 12 });
+  }, []);
 
   const sizeFilteredStations = useMemo(() => {
-    if (sizeTab === "all") return filteredStations;
-    return filteredStations.filter((s) => s.size === sizeTab);
-  }, [filteredStations, sizeTab]);
+    if (sizeTab === "all") return mapView.filtered;
+    return mapView.filtered.filter((s) => s.size === sizeTab);
+  }, [mapView.filtered, sizeTab]);
 
-  const layers = useMemo<Layer[]>(() => {
-    if (!filteredStations.length) return [];
-    const maxFreq = Math.max(...filteredStations.map((s) => s.direct_freq));
-
+  const stationLayers = useMemo<Layer[]>(() => {
+    if (!mapView.filtered.length) return [];
+    const maxFreq = Math.max(...mapView.filtered.map((s) => s.direct_freq));
     return [
-      stationLayer("connectivity-stations", filteredStations, {
+      stationLayer("connectivity-stations", mapView.filtered, {
         positionFn: (d) => [d.lon, d.lat],
         radiusFn: (d) => 3 + (d.direct_freq / Math.max(maxFreq, 1)) * 12,
         colorFn: (d) => SIZE_COLORS[d.size] ?? [51, 51, 51, 160],
@@ -102,25 +123,26 @@ function ConnectivityPage() {
         radiusMaxPixels: 20,
       }),
     ] as Layer[];
-  }, [filteredStations]);
+  }, [mapView.filtered]);
+
+  const layers = mapView.isOverlayView ? mapView.overlayLayers : stationLayers;
 
   const regionColors: Record<string, string> = { Brussels: "#e31a1c", Flanders: "#ff7f00", Wallonia: "#2557e6" };
 
   const scatterData = useMemo(() => {
     return Object.entries(regionColors).map(([region, color]) => ({
-      region,
-      color,
+      region, color,
       data: sizeFilteredStations.filter((s) => s.region === region),
     }));
   }, [sizeFilteredStations]);
 
   const sizeAvg = useMemo(() => {
-    if (!sizeFilteredStations.length) return { count: 0, avgA: 0, avgB: 0, avgC: 0 };
+    if (!sizeFilteredStations.length) return { count: 0, avgReachable: 0, avgFreq: 0, avgReach: 0 };
     const count = sizeFilteredStations.length;
-    const avgA = sizeFilteredStations.reduce((sum, s) => sum + s.reachable, 0) / count;
-    const avgB = sizeFilteredStations.reduce((sum, s) => sum + s.direct_freq, 0) / count;
-    const avgC = sizeFilteredStations.reduce((sum, s) => sum + s.reach_km, 0) / count;
-    return { count, avgA, avgB, avgC };
+    const avgReachable = sizeFilteredStations.reduce((sum, s) => sum + s.reachable, 0) / count;
+    const avgFreq = sizeFilteredStations.reduce((sum, s) => sum + s.direct_freq, 0) / count;
+    const avgReach = sizeFilteredStations.reduce((sum, s) => sum + s.reach_km, 0) / count;
+    return { count, avgReachable, avgFreq, avgReach };
   }, [sizeFilteredStations]);
 
   const sizeComparisonData = useMemo(() => {
@@ -130,34 +152,31 @@ function ConnectivityPage() {
     return sizes.map((size) => {
       const stations = data.stations.filter((s) => s.size === size);
       const count = stations.length;
-      if (count === 0) return { label: labels[size], count: 0, avgA: 0, avgB: 0, avgC: 0 };
-      const avgA = stations.reduce((sum, s) => sum + s.reachable, 0) / count;
-      const avgB = stations.reduce((sum, s) => sum + s.direct_freq, 0) / count;
-      const avgC = stations.reduce((sum, s) => sum + s.reach_km, 0) / count;
-      return { label: labels[size], count, avgA, avgB, avgC };
+      if (count === 0) return { label: labels[size], count: 0, avgReachable: 0, avgFreq: 0, avgReach: 0 };
+      const avgReachable = stations.reduce((sum, s) => sum + s.reachable, 0) / count;
+      const avgFreq = stations.reduce((sum, s) => sum + s.direct_freq, 0) / count;
+      const avgReach = stations.reduce((sum, s) => sum + s.reach_km, 0) / count;
+      return { label: labels[size], count, avgReachable, avgFreq, avgReach };
     });
   }, [data]);
 
-  // Get max values for ZAxis domain
   const zDomains = useMemo(() => {
-    if (!sizeFilteredStations.length) return { maxA: 1, maxB: 1, maxC: 1 };
+    if (!sizeFilteredStations.length) return { maxReachable: 1, maxFreq: 1, maxReach: 1 };
     return {
-      maxA: Math.max(...sizeFilteredStations.map((s) => s.reachable), 1),
-      maxB: Math.max(...sizeFilteredStations.map((s) => s.direct_freq), 1),
-      maxC: Math.max(...sizeFilteredStations.map((s) => s.reach_km), 1),
+      maxReachable: Math.max(...sizeFilteredStations.map((s) => s.reachable), 1),
+      maxFreq: Math.max(...sizeFilteredStations.map((s) => s.direct_freq), 1),
+      maxReach: Math.max(...sizeFilteredStations.map((s) => s.reach_km), 1),
     };
   }, [sizeFilteredStations]);
 
+  const activeScatter = SCATTER_TABS.find((t) => t.value === scatterTab) ?? SCATTER_TABS[0];
+
   const renderScatterChart = (xKey: string, yKey: string, zKey: string, xLabel: string, yLabel: string, zLabel: string) => {
     const keyMap: Record<string, (s: Station) => number> = {
-      reachable: (s) => s.reachable,
-      direct_freq: (s) => s.direct_freq,
-      reach_km: (s) => s.reach_km,
+      reachable: (s) => s.reachable, direct_freq: (s) => s.direct_freq, reach_km: (s) => s.reach_km,
     };
-    const getX = keyMap[xKey];
-    const getY = keyMap[yKey];
-    const getZ = keyMap[zKey];
-    const maxZ = zKey === "reachable" ? zDomains.maxA : zKey === "direct_freq" ? zDomains.maxB : zDomains.maxC;
+    const getX = keyMap[xKey], getY = keyMap[yKey], getZ = keyMap[zKey];
+    const maxZ = zKey === "reachable" ? zDomains.maxReachable : zKey === "direct_freq" ? zDomains.maxFreq : zDomains.maxReach;
 
     return (
       <ResponsiveContainer width="100%" height="100%">
@@ -173,19 +192,15 @@ function ConnectivityPage() {
                 <b>{d.name}</b><br />
                 {xLabel}: {typeof d.x === "number" && d.x % 1 !== 0 ? d.x.toFixed(1) : d.x}<br />
                 {yLabel}: {typeof d.y === "number" && d.y % 1 !== 0 ? d.y.toFixed(1) : d.y}<br />
-                {zLabel} (size): {typeof d.z === "number" && d.z % 1 !== 0 ? d.z.toFixed(1) : d.z}
+                <span className="text-muted-foreground">{zLabel} (bubble size): {typeof d.z === "number" && d.z % 1 !== 0 ? d.z.toFixed(1) : d.z}</span>
               </div>
             );
           }} />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           {scatterData.map(({ region, color, data: regionData }) => (
-            <Scatter
-              key={region}
-              name={region}
+            <Scatter key={region} name={region}
               data={regionData.map((s) => ({ x: getX(s), y: getY(s), z: getZ(s), name: s.name }))}
-              fill={color + "88"}
-              stroke={color}
-            />
+              fill={color + "88"} stroke={color} />
           ))}
         </ScatterChart>
       </ResponsiveContainer>
@@ -215,22 +230,6 @@ function ConnectivityPage() {
               </div>
             </div>
           </div>
-
-          <div className="border-t border-border/40 pt-3 mt-3">
-            <Label>Station Size</Label>
-            {[
-              { label: "Small (<4 trains/h)", checked: showSmall, set: setShowSmall, color: SIZE_CSS.small },
-              { label: "Medium (4-10 trains/h)", checked: showMedium, set: setShowMedium, color: SIZE_CSS.medium },
-              { label: "Big (>=10 trains/h)", checked: showBig, set: setShowBig, color: SIZE_CSS.big },
-            ].map((f) => (
-              <label key={f.label} className="flex items-center gap-2 text-xs text-foreground/60 cursor-pointer mt-1.5">
-                <input type="checkbox" checked={f.checked} onChange={(e) => f.set(e.target.checked)} className="rounded border-border text-primary" />
-                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: f.color }} />
-                {f.label}
-              </label>
-            ))}
-          </div>
-
           <div className="border-t border-border/40 pt-3 mt-3">
             <FilterPanel filters={filters} onChange={setFilters} />
           </div>
@@ -245,34 +244,66 @@ function ConnectivityPage() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Total Stations" value={fmt(data.total)} />
-            <MetricCard label="Small" value={fmt(data.n_small)} />
-            <MetricCard label="Medium" value={fmt(data.n_medium)} />
-            <MetricCard label="Big" value={fmt(data.n_big)} />
+            <MetricCard label="Small (<4/h)" value={fmt(data.n_small)} />
+            <MetricCard label="Medium (4-10/h)" value={fmt(data.n_medium)} />
+            <MetricCard label="Big (>10/h)" value={fmt(data.n_big)} />
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
             <div className="space-y-2">
-              <DeckMap ref={mapRef} layers={layers} className="h-96" />
-              <div className="flex gap-4 text-[10px] text-muted-foreground">
-                {Object.entries(SIZE_CSS).map(([size, color]) => (
-                  <span key={size} className="flex items-center gap-1">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
-                    {size}
-                  </span>
-                ))}
-                <span className="ml-auto">Size = direct freq/h</span>
-              </div>
+              <MapViewBar
+                viewMode={mapView.viewMode}
+                onViewModeChange={mapView.setViewMode}
+                sizeFilter={mapView.sizeFilter}
+                onSizeFilterChange={mapView.setSizeEnabled}
+                choroplethMetric={mapView.choroplethMetric}
+                onChoroplethMetricChange={mapView.setChoroplethMetric}
+                metrics={mapView.metrics}
+                showGradient={mapView.showGradient}
+                activeMetric={mapView.activeMetric}
+              />
+              <DeckMap ref={mapRef} layers={layers} className="h-96"
+                getTooltip={({ object, layer }) => {
+                  if (!object || !layer) return null;
+                  const id = layer.id as string;
+                  if (id === "connectivity-stations") {
+                    return tooltipBox(
+                      `<b>${object.name}</b> <span style="opacity:0.6">(${object.size})</span><br/>` +
+                      `<b>${fmt(object.reachable ?? 0)}</b> reachable stations<br/>` +
+                      `<span style="opacity:0.7">${fmt(object.direct_freq ?? 0, 1)} trains/h &middot; ${fmt(object.reach_km ?? 0, 0)} km reach</span>`
+                    );
+                  }
+                  if (id.startsWith("mapview-")) {
+                    const name = object.properties?.name ?? "";
+                    const val = object.properties?._value;
+                    return tooltipBox(`<b>${name}</b><br/>Avg ${mapView.activeMetric.label}: ${val != null ? fmt(val, 1) + (mapView.activeMetric.suffix ?? "") : "\u2014"}`);
+                  }
+                  return null;
+                }}
+              />
+              {!mapView.isOverlayView && (
+                <div className="flex gap-4 text-[10px] text-muted-foreground">
+                  {Object.entries(SIZE_CSS).map(([size, color]) => (
+                    <span key={size} className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+                      {size}
+                    </span>
+                  ))}
+                  <span className="ml-auto">Circle size = direct frequency</span>
+                </div>
+              )}
             </div>
             <div className="bg-card rounded-2xl border border-border/50 p-5 h-96 shadow-sm">
               <Tabs value={scatterTab} onValueChange={setScatterTab} className="h-full flex flex-col">
                 <TabsList className="w-full mb-3">
-                  <TabsTrigger value="ab" className="flex-1 text-xs">A x B (size=C)</TabsTrigger>
-                  <TabsTrigger value="bc" className="flex-1 text-xs">B x C (size=A)</TabsTrigger>
-                  <TabsTrigger value="ac" className="flex-1 text-xs">A x C (size=B)</TabsTrigger>
+                  {SCATTER_TABS.map((t) => (
+                    <TabsTrigger key={t.value} value={t.value} className="flex-1 text-xs">{t.label}</TabsTrigger>
+                  ))}
                 </TabsList>
+                <p className="text-[10px] text-muted-foreground mb-2">
+                  Bubble size = {activeScatter.zLabel} &middot; Color = region
+                </p>
                 <div className="flex-1">
-                  {scatterTab === "ab" && renderScatterChart("reachable", "direct_freq", "reach_km", "Reachable (A)", "Freq/h (B)", "Reach km (C)")}
-                  {scatterTab === "bc" && renderScatterChart("direct_freq", "reach_km", "reachable", "Freq/h (B)", "Reach km (C)", "Reachable (A)")}
-                  {scatterTab === "ac" && renderScatterChart("reachable", "reach_km", "direct_freq", "Reachable (A)", "Reach km (C)", "Freq/h (B)")}
+                  {renderScatterChart(activeScatter.xKey, activeScatter.yKey, activeScatter.zKey, activeScatter.xLabel, activeScatter.yLabel, activeScatter.zLabel)}
                 </div>
               </Tabs>
             </div>
@@ -290,9 +321,9 @@ function ConnectivityPage() {
             </Tabs>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
               <MetricCard label="Stations" value={fmt(sizeAvg.count)} />
-              <MetricCard label="Avg Reachable (A)" value={sizeAvg.avgA.toFixed(1)} />
-              <MetricCard label="Avg Freq/h (B)" value={sizeAvg.avgB.toFixed(2)} />
-              <MetricCard label="Avg Reach (C)" value={sizeAvg.avgC.toFixed(0)} suffix=" km" />
+              <MetricCard label="Avg Reachable" value={sizeAvg.avgReachable.toFixed(1)} />
+              <MetricCard label="Avg Freq/h" value={sizeAvg.avgFreq.toFixed(2)} />
+              <MetricCard label="Avg Cardinal Reach" value={sizeAvg.avgReach.toFixed(0)} suffix=" km" />
             </div>
           </div>
 
@@ -302,22 +333,48 @@ function ConnectivityPage() {
                 title="Size Comparison Summary"
                 keyFn={(row) => row.label}
                 data={sizeComparisonData}
+                onRowClick={() => {}}
                 columns={[
                   { header: "Size", accessor: (row) => <span className="font-medium">{row.label}</span> },
                   { header: "Count", accessor: (row) => fmt(row.count), align: "right" },
-                  { header: "Avg Reachable", accessor: (row) => row.avgA.toFixed(1), align: "right" },
-                  { header: "Avg Freq/h", accessor: (row) => row.avgB.toFixed(2), align: "right" },
-                  { header: "Avg Reach km", accessor: (row) => <span className="font-semibold text-primary">{row.avgC.toFixed(0)}</span>, align: "right" },
+                  { header: "Avg Reachable", accessor: (row) => row.avgReachable.toFixed(1), align: "right" },
+                  { header: "Avg Freq/h", accessor: (row) => row.avgFreq.toFixed(2), align: "right" },
+                  { header: "Avg Reach (km)", accessor: (row) => <span className="font-semibold text-primary">{row.avgReach.toFixed(0)}</span>, align: "right" },
+                ]}
+              />
+            </div>
+          )}
+
+          {data.stations.length > 0 && (
+            <div className="mb-4 animate-slide-up">
+              <DataTable
+                title="All Stations"
+                keyFn={(s) => s.name}
+                data={sizeFilteredStations}
+                maxRows={50}
+                onRowClick={handleStationClick}
+                columns={[
+                  { header: "Station", accessor: (s) => <span className="font-medium">{s.name}</span> },
+                  { header: "Size", accessor: (s) => (
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: SIZE_CSS[s.size] }} />
+                      <span className="text-muted-foreground capitalize">{s.size}</span>
+                    </span>
+                  )},
+                  { header: "Reachable", accessor: (s) => fmt(s.reachable), align: "right" },
+                  { header: "Freq/h", accessor: (s) => fmt(s.direct_freq, 1), align: "right" },
+                  { header: "Reach (km)", accessor: (s) => <span className="font-semibold text-primary">{fmt(s.reach_km, 0)}</span>, align: "right" },
                 ]}
               />
             </div>
           )}
 
           <MethodologyPanel>
-            <p><b>Metric A (Reachable Destinations):</b> BFS-based reachability count within the time budget, considering transfers.</p>
-            <p><b>Metric B (Direct Frequency):</b> Average direct trains per hour between 6h-22h, normalized across GTFS feeds.</p>
-            <p><b>Metric C (Cardinal Reach):</b> Maximum geographic reach distance in each cardinal direction (N/E/S/W), summed to represent geographic extent.</p>
-            <p>Station size classification: Small (&lt;4 trains/h), Medium (4-10), Big (&gt;10). Bubble size in scatter plots encodes the third metric not shown on axes.</p>
+            <p>Each station is evaluated on three connectivity dimensions:</p>
+            <p><b>Reachable stations</b> — how many other stations can be reached within the time budget via BFS graph traversal, considering transfers and waiting times.</p>
+            <p><b>Direct frequency</b> — average direct departures per hour (6h-22h), normalized across GTFS feeds. Stations are classified as Small (&lt;4/h), Medium (4-10/h), or Big (&gt;10/h).</p>
+            <p><b>Cardinal reach</b> — maximum geographic distance reached in each cardinal direction (N/E/S/W), summed to represent how far a station's connections extend geographically.</p>
+            <p>The scatter plots let you explore relationships between these three metrics. Each dot is a station, colored by region (Brussels / Flanders / Wallonia), with bubble size encoding the third metric.</p>
           </MethodologyPanel>
         </>
       )}

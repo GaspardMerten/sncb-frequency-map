@@ -14,13 +14,16 @@ import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { MapViewBar, mapViewTooltip } from "@/components/MapViewBar";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { fetchApi } from "@/lib/api";
 import { fmt, daysAgo } from "@/lib/utils";
 import { stationLayer, colorToRGBA } from "@/lib/layers";
+import { tooltipBox } from "@/lib/tooltip";
 import { cn } from "@/lib/utils";
+import { useMapView, makeTercileClassifier, type MetricOption } from "@/hooks/useMapView";
 
 export const missedRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -31,11 +34,16 @@ export const missedRoute = createRoute({
 interface MissedStation { name: string; lat?: number; lon?: number; planned: number; missed: number; pct_missed: number; }
 interface MissedData { total_connections: number; total_missed: number; pct_missed: number; stations: MissedStation[]; error?: string; }
 
+const METRICS: MetricOption[] = [
+  { key: "pct_missed", label: "% Missed", accessor: (d: MissedStation) => d.pct_missed, suffix: "%" },
+  { key: "missed", label: "Missed count", accessor: (d: MissedStation) => d.missed },
+];
+
 function MissedPage() {
   const [startDate, setStartDate] = useState(daysAgo(7));
   const [endDate, setEndDate] = useState(daysAgo(1));
   const [minTransfer, setMinTransfer] = useState(2);
-  const [maxTransfer, setMaxTransfer] = useState(30);
+  const [maxTransfer, setMaxTransfer] = useState(15);
   const [hourStart, setHourStart] = useState(0);
   const [hourEnd, setHourEnd] = useState(24);
   const [minConnections, setMinConnections] = useState(10);
@@ -48,9 +56,34 @@ function MissedPage() {
     enabled: !!queryParams,
   });
 
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
   const loadData = () => setQueryParams({
     start: startDate, end: endDate, min_transfer: minTransfer, max_transfer: maxTransfer,
     hour_start: hourStart, hour_end: hourEnd, min_connections: minConnections,
+  });
+
+  const geoStations = useMemo(
+    () => (data?.stations ?? []).filter((s): s is MissedStation & { lat: number; lon: number } => !!s.lat && !!s.lon),
+    [data],
+  );
+
+  const sizeClassifier = useMemo(
+    () => makeTercileClassifier(geoStations, (d) => d.missed),
+    [geoStations],
+  );
+
+  const mapView = useMapView({
+    data: geoStations,
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    getSize: sizeClassifier,
+    metrics: METRICS,
+    showGradient: true,
   });
 
   const top10Stations = useMemo(() => {
@@ -62,7 +95,6 @@ function MissedPage() {
     }));
   }, [data]);
 
-  // Histogram of miss rates
   const histogramData = useMemo(() => {
     if (!data?.stations || data.stations.length < 2) return [];
     const bins = 15;
@@ -82,22 +114,22 @@ function MissedPage() {
     return counts.filter((b) => b.count > 0);
   }, [data]);
 
-  const layers = useMemo<Layer[]>(() => {
-    if (!data || data.error) return [];
-    const stations = data.stations.filter((s) => s.lat && s.lon);
-    if (!stations.length) return [];
-    const maxMissed = Math.max(...stations.map((s) => s.missed));
+  const stationLayers = useMemo<Layer[]>(() => {
+    if (!data || data.error || !mapView.filtered.length) return [];
+    const maxMissed = Math.max(...mapView.filtered.map((s) => s.missed));
 
     return [
-      stationLayer("missed-stations", stations, {
-        positionFn: (d) => [d.lon!, d.lat!],
+      stationLayer("missed-stations", mapView.filtered, {
+        positionFn: (d) => [d.lon, d.lat],
         radiusFn: (d) => 4 + (d.missed / Math.max(maxMissed, 1)) * 16,
         colorFn: (d) => colorToRGBA(d.missed / Math.max(maxMissed, 1)),
         radiusMinPixels: 3,
         radiusMaxPixels: 30,
       }),
     ] as Layer[];
-  }, [data]);
+  }, [data, mapView.filtered]);
+
+  const layers = mapView.isOverlayView ? mapView.overlayLayers : stationLayers;
 
   return (
     <Layout
@@ -135,11 +167,36 @@ function MissedPage() {
             <MetricCard label="% Missed" value={data.pct_missed} suffix="%" danger={data.pct_missed > 10} />
             <MetricCard label="Worst Station" value={data.stations[0]?.name ?? "\u2014"} />
           </div>
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+
+          <MapViewBar
+            viewMode={mapView.viewMode}
+            onViewModeChange={mapView.setViewMode}
+            sizeFilter={mapView.sizeFilter}
+            onSizeFilterChange={mapView.setSizeEnabled}
+            choroplethMetric={mapView.choroplethMetric}
+            onChoroplethMetricChange={mapView.setChoroplethMetric}
+            metrics={mapView.metrics}
+            showGradient={mapView.showGradient}
+            activeMetric={mapView.activeMetric}
+            isOverlayView={mapView.isOverlayView}
+          />
+
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mt-3">
             <div className="xl:col-span-2 space-y-4">
               <div className="space-y-2">
-                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-22rem)]" />
-                <ColorLegend min="Few missed" max="Many missed" />
+                <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-22rem)]"
+                  getTooltip={(info) => {
+                    const mv = mapViewTooltip(mapView.activeMetric, info);
+                    if (mv) return mv;
+                    const { object, layer } = info;
+                    if (!object || !layer) return null;
+                    if (layer.id === "missed-stations") {
+                      return tooltipBox(`<b>${object.name}</b><br/>Missed: ${fmt(object.missed)} / ${fmt(object.planned)}<br/>${fmt(object.pct_missed, 1)}%`);
+                    }
+                    return null;
+                  }}
+                />
+                {!mapView.isOverlayView && <ColorLegend min="Few missed" max="Many missed" />}
               </div>
               {top10Stations.length > 0 && (
                 <div className="bg-card rounded-2xl border border-border/50 p-5 shadow-sm animate-slide-up">

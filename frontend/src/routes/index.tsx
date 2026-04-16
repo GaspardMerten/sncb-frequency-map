@@ -4,7 +4,7 @@ import { rootRoute } from "./__root";
 import { Layout } from "@/components/Layout";
 import { Badge } from "@/components/ui/badge";
 import { PAGES } from "@/lib/constants";
-import { Train, ArrowRight, Database, Cpu, Eye } from "lucide-react";
+import { Train, ArrowRight, Database, Cpu, Eye, FileText } from "lucide-react";
 
 export const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -68,6 +68,30 @@ function HomePage() {
           Explore train frequencies, station reachability, travel times, and punctuality across Belgium's entire transit network.
         </p>
       </div>
+
+      {/* Report banner */}
+      <Link
+        to="/report/missed"
+        className="group block rounded-2xl border border-primary/20 bg-gradient-to-r from-rose-500/[0.06] via-amber-500/[0.04] to-primary/[0.06] p-5 mb-5 transition-all duration-300 hover:shadow-lg hover:shadow-primary/[0.08] hover:-translate-y-0.5"
+      >
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-rose-500/15 to-amber-500/10 flex items-center justify-center shrink-0 transition-transform duration-300 group-hover:scale-110">
+            <FileText className="w-6 h-6 text-destructive/70" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-bold text-foreground tracking-tight group-hover:text-primary transition-colors">
+                Missed Connections Report
+              </h3>
+              <Badge className="bg-rose-50 text-rose-600 border-rose-100 text-[9px] font-semibold">Story</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+              Scrollable data story exploring how delays break thousands of planned transfers across Belgium's rail network.
+            </p>
+          </div>
+          <ArrowRight className="w-4 h-4 text-muted-foreground/30 group-hover:text-primary/60 transition-all duration-300 group-hover:translate-x-1 shrink-0" />
+        </div>
+      </Link>
 
       {/* Page cards grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">

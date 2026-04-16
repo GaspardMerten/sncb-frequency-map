@@ -6,6 +6,7 @@ Wraps the existing logic/ modules with caching for the FastAPI app.
 import logging
 import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 from logic.api import (
@@ -42,6 +43,29 @@ def _safe_fetch(fn, *args):
         return fn(*args)
     except Exception:
         return None
+
+
+def prefetch_punctuality(dates: list[date], max_workers: int = 8,
+                         on_progress=None) -> None:
+    """Pre-warm the punctuality cache for a list of dates in parallel.
+
+    Each date is fetched via load_punctuality_data (which is @cached), so
+    subsequent sequential access hits the warm cache.  *on_progress*, if
+    provided, is called with (completed_count, total) after each date
+    finishes — useful for streaming progress to the frontend.
+    """
+    total = len(dates)
+    if total == 0:
+        return
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(max_workers, total)) as pool:
+        futures = {pool.submit(load_punctuality_data, d): d for d in dates}
+        for fut in as_completed(futures):
+            fut.result()          # propagate exceptions / populate cache
+            done += 1
+            if on_progress:
+                on_progress(done, total)
 
 
 @cached(ttl=3600)
@@ -262,13 +286,12 @@ def load_reach_data(
 
     departures = data["station_departures"]
     stop_lookup = data["stop_lookup"]
-    served = data["served_stations"]
     max_minutes = time_budget * 60
 
-    stations = []
+    by_key: dict = {}
     reachable_counts = []
 
-    for sid in served:
+    for sid in departures.keys():
         info = stop_lookup.get(sid)
         if not info:
             continue
@@ -282,27 +305,34 @@ def load_reach_data(
         n_reach = len(reachable)
         reachable_counts.append(n_reach)
 
-        dests = []
+        dests_by_name: dict = {}
         for dest_id, r_info in reachable.items():
             d_info = stop_lookup.get(dest_id)
-            if d_info:
-                dests.append({
-                    "name": d_info["name"],
+            if not d_info:
+                continue
+            name = d_info["name"]
+            t = round(r_info["travel_time"], 1)
+            if name not in dests_by_name or t < dests_by_name[name]["time"]:
+                dests_by_name[name] = {
+                    "name": name,
                     "lat": d_info["lat"],
                     "lon": d_info["lon"],
-                    "time": round(r_info["travel_time"], 1),
-                })
+                    "time": t,
+                }
 
-        stations.append({
-            "id": sid,
-            "name": info["name"],
-            "lat": info["lat"],
-            "lon": info["lon"],
-            "reachable": n_reach,
-            "destinations": sorted(dests, key=lambda d: d["time"]),
-        })
+        key = info["name"]
+        existing = by_key.get(key)
+        if existing is None or n_reach > existing["reachable"]:
+            by_key[key] = {
+                "id": sid,
+                "name": info["name"],
+                "lat": info["lat"],
+                "lon": info["lon"],
+                "reachable": n_reach,
+                "destinations": sorted(dests_by_name.values(), key=lambda d: d["time"]),
+            }
 
-    stations.sort(key=lambda s: -s["reachable"])
+    stations = sorted(by_key.values(), key=lambda s: -s["reachable"])
 
     if reachable_counts:
         max_r = max(reachable_counts)
@@ -352,15 +382,14 @@ def load_connectivity_data(
 
     departures = data["station_departures"]
     stop_lookup = data["stop_lookup"]
-    served = data["served_stations"]
     n_feeds = data["n_feeds"]
     max_minutes = time_budget * 60
     prov_geo = data["prov_geo"]
 
-    stations = []
+    by_name: dict = {}
     counts = {"Small": 0, "Medium": 0, "Big": 0}
 
-    for sid in served:
+    for sid in departures.keys():
         info = stop_lookup.get(sid)
         if not info:
             continue
@@ -381,10 +410,15 @@ def load_connectivity_data(
         province = get_province(info["lat"], info["lon"], prov_geo)
         region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
 
+        name = info["name"]
+        existing = by_name.get(name)
+        if existing is not None and existing["reachable"] >= a_count:
+            continue
+        if existing is not None:
+            counts[existing["_size_label"]] = max(counts.get(existing["_size_label"], 1) - 1, 0)
         counts[size] = counts.get(size, 0) + 1
-
-        stations.append({
-            "name": info["name"],
+        by_name[name] = {
+            "name": name,
             "lat": info["lat"],
             "lon": info["lon"],
             "reachable": a_count,
@@ -392,9 +426,12 @@ def load_connectivity_data(
             "reach_km": c_reach,
             "size": size.lower(),
             "region": region,
-        })
+            "_size_label": size,
+        }
 
-    stations.sort(key=lambda s: -s["reachable"])
+    stations = sorted(by_name.values(), key=lambda s: -s["reachable"])
+    for st in stations:
+        st.pop("_size_label", None)
 
     return {
         "stations": stations,
@@ -515,7 +552,7 @@ def load_duration_data(
 
 
 @cached(ttl=3600)
-def load_punctuality_data(target_date: date, hour_range: tuple[int, int] = (5, 24)) -> dict:
+def load_punctuality_data(target_date: date) -> dict:
     """Load punctuality data for a single date."""
     ts = noon_timestamp(target_date.year, target_date.month, target_date.day)
 

@@ -15,16 +15,17 @@ import { ApplyButton } from "@/components/ApplyButton";
 import { ColorLegend } from "@/components/ColorLegend";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
 import { DataTable } from "@/components/DataTable";
+import { MapViewBar, mapViewTooltip } from "@/components/MapViewBar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
-import { colorToRGBA, heatmapLayer, choroplethLayer } from "@/lib/layers";
+import { colorToRGBA } from "@/lib/layers";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
-import { aggregateByProvince, buildChoroplethGeoJSON, buildRegionGeoJSON, getRegion } from "@/lib/geo";
+import { useMapView, makeTercileClassifier, type MetricOption } from "@/hooks/useMapView";
 
 export const durationRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -44,13 +45,12 @@ interface DurationData {
 
 type Aggregation = "average" | "min" | "max";
 type TransportMode = "walk" | "bike" | "car";
-type ViewMode = "stations" | "gradient" | "provinces" | "regions";
 
-const TRANSPORT_SPEEDS: Record<TransportMode, number> = {
-  walk: 5,
-  bike: 15,
-  car: 50,
-};
+const TRANSPORT_SPEEDS: Record<TransportMode, number> = { walk: 5, bike: 15, car: 50 };
+
+const METRICS: MetricOption[] = [
+  { key: "duration", label: "Duration (min)", accessor: (d: DurationStation) => d.duration, suffix: " min" },
+];
 
 function DurationPage() {
   const [filters, setFilters] = useState<Filters>({
@@ -64,7 +64,6 @@ function DurationPage() {
   const [maxTransfers, setMaxTransfers] = useState(3);
   const [aggregation, setAggregation] = useState<Aggregation>("average");
   const [transportMode, setTransportMode] = useState<TransportMode>("walk");
-  const [viewMode, setViewMode] = useState<ViewMode>("stations");
   const [destSearch, setDestSearch] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedDests, setSelectedDests] = useState<string[]>(["Bruxelles-Central"]);
@@ -91,6 +90,21 @@ function DurationPage() {
     });
   };
 
+  const sizeClassifier = useMemo(
+    () => makeTercileClassifier(data?.stations ?? [], (d) => d.duration),
+    [data],
+  );
+
+  const mapView = useMapView<DurationStation>({
+    data: data?.stations ?? [],
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    getSize: sizeClassifier,
+    metrics: METRICS,
+    showGradient: true,
+  });
+
   const suggestions = useMemo(() => {
     if (!destSearch || destSearch.length < 2 || !data) return [];
     return data.stations
@@ -108,112 +122,50 @@ function DurationPage() {
 
   const sortedStations = useMemo(() => {
     if (!data?.stations) return [];
-    return [...data.stations].sort((a, b) => a.duration - b.duration);
-  }, [data]);
+    return [...mapView.filtered].sort((a, b) => a.duration - b.duration);
+  }, [mapView.filtered]);
 
   const mileLabel = direction === "to" ? "First-mile transport" : "Last-mile transport";
 
-  const layers = useMemo((): Layer[] => {
-    if (!data || data.error) return [];
+  const stationLayers = useMemo((): Layer[] => {
+    if (!data || data.error || !mapView.filtered.length) return [];
 
-    const maxDur = timeBudget * 60;
-
-    if (viewMode === "provinces" && geoData && data.stations.length) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.duration,
-      );
-      const valueMap = new Map<string, number>();
-      for (const [name, agg] of byProvince) valueMap.set(name, agg.avg);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const enriched = buildChoroplethGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("duration-province-choropleth", enriched, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode === "regions" && geoData && data.stations.length) {
-      const byProvince = aggregateByProvince(
-        data.stations, geoData,
-        (d) => d.lon, (d) => d.lat, (d) => d.duration,
-      );
-      const regionAgg = new Map<string, { sum: number; count: number }>();
-      for (const [province, agg] of byProvince) {
-        const region = getRegion(province);
-        const existing = regionAgg.get(region);
-        if (existing) {
-          existing.sum += agg.sum;
-          existing.count += agg.count;
-        } else {
-          regionAgg.set(region, { sum: agg.sum, count: agg.count });
-        }
-      }
-      const valueMap = new Map<string, number>();
-      for (const [region, agg] of regionAgg) valueMap.set(region, agg.sum / agg.count);
-      const maxVal = Math.max(...valueMap.values(), 1);
-      const regionGeo = buildRegionGeoJSON(geoData, valueMap);
-
-      return [choroplethLayer("duration-region-choropleth", regionGeo, {
-        valueFn: (f) => f.properties._value,
-        colorFn: (f) => colorToRGBA(f.properties._value / maxVal, 160),
-        pickable: true,
-      })] as Layer[];
-    }
-
-    if (viewMode === "gradient") {
-      const heat = heatmapLayer("duration-heat", data.stations, {
-        positionFn: (d) => [d.lon, d.lat],
-        weightFn: (d) => Math.max(0, 1 - d.duration / maxDur),
-        radiusPixels: 40,
-        intensity: 2,
-        threshold: 0.03,
-      });
-
-      const destLayer = new ScatterplotLayer({
-        id: "duration-destinations-gradient",
-        data: data.dest_coords || [],
-        getPosition: (d) => [d.lon, d.lat],
-        getRadius: 10,
-        getFillColor: [227, 26, 28, 230],
-        radiusMinPixels: 8,
-        radiusMaxPixels: 14,
-        pickable: true,
-      });
-
-      return [heat, destLayer] as Layer[];
-    }
+    const stations = mapView.filtered;
+    const durations = stations.map((d) => d.duration);
+    const minDur = Math.min(...durations);
+    const maxDurActual = Math.max(...durations);
+    const spread = Math.max(maxDurActual - minDur, 1);
+    const ratio = (d: DurationStation) => (d.duration - minDur) / spread;
 
     const stationsLayer = new ScatterplotLayer({
       id: "duration-stations",
-      data: data.stations,
-      getPosition: (d) => [d.lon, d.lat],
-      getRadius: (d) => 4 + (1 - d.duration / maxDur) * 10,
-      getFillColor: (d) => colorToRGBA(d.duration / maxDur),
-      radiusMinPixels: 3,
-      radiusMaxPixels: 18,
+      data: stations,
+      getPosition: (d: DurationStation) => [d.lon, d.lat],
+      getRadius: (d: DurationStation) => 2 + (1 - ratio(d)) * 10,
+      getFillColor: (d: DurationStation) => colorToRGBA(ratio(d), 230),
+      radiusUnits: "pixels",
+      radiusMinPixels: 2,
+      radiusMaxPixels: 22,
       pickable: true,
-      updateTriggers: {
-        getRadius: [timeBudget],
-        getFillColor: [timeBudget],
-      },
+      updateTriggers: { getRadius: [minDur, maxDurActual], getFillColor: [minDur, maxDurActual] },
     });
 
     const destLayer = new ScatterplotLayer({
       id: "duration-destinations",
       data: data.dest_coords || [],
       getPosition: (d) => [d.lon, d.lat],
-      getRadius: 10,
+      getRadius: 8,
       getFillColor: [227, 26, 28, 230],
-      radiusMinPixels: 8,
-      radiusMaxPixels: 14,
+      radiusUnits: "pixels",
+      radiusMinPixels: 7,
+      radiusMaxPixels: 12,
       pickable: true,
     });
 
     return [stationsLayer, destLayer] as Layer[];
-  }, [data, geoData, viewMode, timeBudget]);
+  }, [data, mapView.filtered, timeBudget]);
+
+  const layers = mapView.isOverlayView ? mapView.overlayLayers : stationLayers;
 
   return (
     <Layout
@@ -238,18 +190,7 @@ function DurationPage() {
               </TabsList>
             </Tabs>
           </div>
-          <div className="border-t border-border/40 pt-3 mt-3">
-            <Label>View</Label>
-            <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="mt-1.5">
-              <TabsList className="w-full">
-                <TabsTrigger value="stations" className="flex-1">Stations</TabsTrigger>
-                <TabsTrigger value="gradient" className="flex-1">Gradient</TabsTrigger>
-                <TabsTrigger value="provinces" className="flex-1">Provinces</TabsTrigger>
-                <TabsTrigger value="regions" className="flex-1">Regions</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-          {viewMode === "gradient" && (
+          {mapView.viewMode === "gradient" && (
             <div className="border-t border-border/40 pt-3 mt-3">
               <Label>{mileLabel}</Label>
               <Tabs value={transportMode} onValueChange={(v) => setTransportMode(v as TransportMode)} className="mt-1.5">
@@ -259,9 +200,7 @@ function DurationPage() {
                   <TabsTrigger value="car" className="flex-1">Car</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <p className="text-[10px] text-muted-foreground/60 mt-1">
-                Speed: {TRANSPORT_SPEEDS[transportMode]} km/h
-              </p>
+              <p className="text-[10px] text-muted-foreground/60 mt-1">Speed: {TRANSPORT_SPEEDS[transportMode]} km/h</p>
             </div>
           )}
           <div className="border-t border-border/40 pt-3 mt-3 space-y-2">
@@ -297,35 +236,19 @@ function DurationPage() {
               onChange={(e) => { setDestSearch(e.target.value); setShowSuggestions(true); }}
               onFocus={() => setShowSuggestions(true)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  if (suggestions.length > 0) {
-                    addDest(suggestions[0].name);
-                  } else {
-                    addDest(destSearch);
-                  }
-                }
+                if (e.key === "Enter") { addDest(suggestions.length > 0 ? suggestions[0].name : destSearch); }
                 if (e.key === "Escape") setShowSuggestions(false);
               }}
               placeholder="Search station..."
               className="max-w-sm text-sm"
             />
-            <Button size="sm" variant="secondary" onClick={() => {
-              if (suggestions.length > 0) {
-                addDest(suggestions[0].name);
-              } else {
-                addDest(destSearch);
-              }
-            }}>Add</Button>
+            <Button size="sm" variant="secondary" onClick={() => addDest(suggestions.length > 0 ? suggestions[0].name : destSearch)}>Add</Button>
           </div>
           {showSuggestions && suggestions.length > 0 && (
             <div className="absolute z-50 top-full mt-1 w-full max-w-sm rounded-lg border border-border/50 bg-card shadow-lg overflow-hidden">
               {suggestions.map((s) => (
-                <button
-                  key={s.name}
-                  className="w-full text-left px-3 py-2 text-sm hover:bg-accent/50 transition-colors cursor-pointer flex items-center justify-between"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => addDest(s.name)}
-                >
+                <button key={s.name} className="w-full text-left px-3 py-2 text-sm hover:bg-accent/50 transition-colors cursor-pointer flex items-center justify-between"
+                  onMouseDown={(e) => e.preventDefault()} onClick={() => addDest(s.name)}>
                   <span>{s.name}</span>
                   <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(s.duration)} min</span>
                 </button>
@@ -356,8 +279,33 @@ function DurationPage() {
           </div>
 
           <div className="space-y-2">
-            <DeckMap ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]" />
-            <ColorLegend min="Short travel time" max="Long travel time" />
+            <MapViewBar
+              viewMode={mapView.viewMode}
+              onViewModeChange={mapView.setViewMode}
+              sizeFilter={mapView.sizeFilter}
+              onSizeFilterChange={mapView.setSizeEnabled}
+              choroplethMetric={mapView.choroplethMetric}
+              onChoroplethMetricChange={mapView.setChoroplethMetric}
+              metrics={mapView.metrics}
+              showGradient={mapView.showGradient}
+              activeMetric={mapView.activeMetric}
+              isOverlayView={mapView.isOverlayView}
+            />
+            <DeckMap
+              ref={mapRef} layers={layers} className="h-[calc(100vh-20rem)]"
+              getTooltip={(info) => {
+                const mv = mapViewTooltip(mapView.activeMetric, info);
+                if (mv) return mv;
+                const { object, layer } = info;
+                if (!object || !layer) return null;
+                const id = layer.id as string;
+                const style = { backgroundColor: "rgba(255,255,255,0.95)", color: "#111", padding: "6px 8px", borderRadius: "8px", border: "1px solid #e5e7eb", boxShadow: "0 2px 8px rgba(0,0,0,0.12)" };
+                if (id === "duration-stations") return { html: `<div style="font-size:12px"><b>${object.name}</b><br/>${Math.round(object.duration)} min</div>`, style };
+                if (id === "duration-destinations") return { html: `<div style="font-size:12px"><b>${object.name}</b><br/>Destination</div>`, style };
+                return null;
+              }}
+            />
+            {!mapView.isOverlayView && <ColorLegend min="Short travel time" max="Long travel time" />}
           </div>
 
           {sortedStations.length > 0 && (
@@ -368,19 +316,13 @@ function DurationPage() {
                 data={sortedStations}
                 maxRows={200}
                 columns={[
-                  {
-                    header: "Station",
-                    accessor: (s) => <span className="font-medium">{s.name}</span>,
-                  },
+                  { header: "Station", accessor: (s) => <span className="font-medium">{s.name}</span> },
                   {
                     header: "Duration (min)",
                     accessor: (s) => (
                       <div className="flex items-center justify-end gap-2">
                         <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-primary/60 transition-all"
-                            style={{ width: `${Math.min((s.duration / (timeBudget * 60)) * 100, 100)}%` }}
-                          />
+                          <div className="h-full rounded-full bg-primary/60 transition-all" style={{ width: `${Math.min((s.duration / (timeBudget * 60)) * 100, 100)}%` }} />
                         </div>
                         <span className="text-muted-foreground tabular-nums w-12 text-right">{Math.round(s.duration)}</span>
                       </div>
