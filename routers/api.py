@@ -3270,6 +3270,15 @@ async def api_deleted(
             n_deleted_total / max(n_scheduled_total, 1) * 100, 2,
         )
 
+        # Flag days with implausibly high pct_deleted: Infrabel data gaps
+        # typically manifest as a huge fraction of "missing" trains.
+        suspicious_days = [
+            d_entry["date"] for d_entry in daily
+            if d_entry.get("pct_deleted", 0) > 30
+        ]
+        for d_entry in daily:
+            d_entry["suspicious"] = d_entry["date"] in set(suspicious_days)
+
         return {
             "n_days": n_days,
             "start_date": start_date.isoformat(),
@@ -3284,6 +3293,7 @@ async def api_deleted(
             "hourly": hourly,
             "daily": daily,
             "trains": trains_out[:200],
+            "suspicious_days": suspicious_days,
         }
 
     async def _stream():

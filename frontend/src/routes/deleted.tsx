@@ -26,13 +26,14 @@ export const deletedRoute = createRoute({
 
 interface DeletedStation { name: string; count: number; lat?: number; lon?: number; }
 interface DeletedSegment { a: string; b: string; count: number; }
-interface DailyPoint { date: string; scheduled: number; deleted: number; pct_deleted: number; }
+interface DailyPoint { date: string; scheduled: number; deleted: number; pct_deleted: number; suspicious?: boolean; }
 interface HourlyPoint { hour: number; scheduled: number; deleted: number; pct_deleted: number; }
 interface DeletedTrain {
   train_no: string; date: string; duration_min: number; n_stops: number;
   first_station: string; last_station: string; first_dep_hour: number;
 }
 interface DeletedData {
+  suspicious_days?: string[];
   n_days: number;
   start_date: string;
   end_date: string;
@@ -196,6 +197,17 @@ function DeletedPage() {
 
       {data && !data.error && !isFetching && (
         <>
+          {data.suspicious_days && data.suspicious_days.length > 0 && (
+            <div className="mb-4 rounded-xl border border-amber-400/40 bg-amber-50 text-amber-900 px-4 py-3 text-xs">
+              <b>Data quality warning:</b> {data.suspicious_days.length} day(s)
+              show unusually high deletion rates (&gt; 30%), likely a gap in the
+              Infrabel punctuality feed rather than real cancellations. Affected dates:
+              {" "}
+              {data.suspicious_days.join(", ")}. The summary metrics below include
+              these days; treat the totals as upper bounds.
+            </div>
+          )}
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 animate-slide-up">
             <MetricCard label="Days Analysed" value={fmt(data.n_days)} />
             <MetricCard label="Deleted Trains" value={fmt(data.n_deleted)} danger />

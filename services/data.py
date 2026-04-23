@@ -440,7 +440,7 @@ def load_rankings_data(
       * ``reachable`` = ``|{station_ids reachable within time_budget hours}|``
         using BFS over the GTFS timetable graph, with the same transfer
         penalties as the /reach endpoint.
-      * ``commercial_speeds[].speed_kmh`` = ``rail_km / average(travel_time)``
+      * ``commercial_speeds[].speed_kmh`` = ``rail_km / median(travel_time)``
         where:
           - ``rail_km`` is the shortest-path distance over the Infrabel track
             segment graph (falls back to crow-flies haversine when either
@@ -449,11 +449,15 @@ def load_rankings_data(
             route (e.g., via Brussels), the speed will be slightly
             under-reported relative to the actual on-train experience.
           - ``travel_time`` is ``arr_min - start_min`` from ``_bfs_single``.
-            Starts are the first actual origin departure in each hour of
-            ``[speed_dep_start, speed_dep_end)``, which drives the initial
-            wait at origin toward zero for the optimal path. Residual wait
-            can still occur when BFS chooses a later train for a better
-            onward connection.
+            We sample every actual origin departure in
+            ``[speed_dep_start, speed_dep_end)`` and take the MINIMUM
+            travel time per destination — the fastest directly-available
+            journey. This matches the conventional meaning of "commercial
+            speed" (fastest regular service), rather than an average over
+            all departures (which would include boarding an S-train in the
+            wrong direction and transferring back, biasing times upward).
+            Pairs reachable in fewer than half the hours of the window
+            are reported with ``speed_kmh=null`` to filter freak paths.
 
     Stations sharing a name are deduplicated, keeping the stop with the
     highest ``trains_per_day`` (ties broken by lexicographic stop_id for
@@ -579,20 +583,19 @@ def load_rankings_data(
     for origin in speed_candidates:
         origin_sid = origin["id"]
 
-        # Sample starts: pick the first actual departure in each hour of the
-        # window. This makes initial wait ≈ 0 for the optimal path.
-        origin_deps = sorted(
+        # Sample every actual origin departure in the window. For each
+        # destination we'll take the MINIMUM travel time across these starts
+        # — this is "commercial speed" in its usual sense: the fastest
+        # regularly-available direct journey. Intermediate starts (e.g.,
+        # an S-train to Aalst) yield big travel times that we simply
+        # ignore for this destination.
+        starts = sorted(
             dep_min for dep_min, _, _, _
             in departures.get(origin_sid, [])
             if window_lo <= dep_min < window_hi
         )
-        seen_hours: set[int] = set()
-        starts: list[int] = []
-        for dm in origin_deps:
-            h = dm // 60
-            if h not in seen_hours:
-                seen_hours.add(h)
-                starts.append(dm)
+        # Dedupe exact starts (multiple trips at the same minute do not help)
+        starts = sorted(set(starts))
         if not starts:
             starts = list(range(window_lo, window_hi, 60))
 
@@ -600,7 +603,12 @@ def load_rankings_data(
         origin_ptc = gtfs_to_infra.get(origin_sid)
         rail_dist = _rail_distance_from(origin_ptc, infra_graph) if origin_ptc else {}
 
-        times: dict[str, list[float]] = defaultdict(list)
+        # For each destination, track the minimum observed travel time across
+        # all sampled starts. We also count the number of hours in the window
+        # in which this destination was reachable — connectivity proxy used
+        # below to filter out pairs with only a freak single-hour connection.
+        min_time: dict[str, float] = {}
+        hours_reached: dict[str, set[int]] = defaultdict(set)
         for start_min in starts:
             r = _bfs_single(
                 origin_sid, departures, speed_budget_min, start_min,
@@ -620,14 +628,17 @@ def load_rankings_data(
                 if dname not in per_name or t < per_name[dname]:
                     per_name[dname] = t
             for dname, t in per_name.items():
-                times[dname].append(t)
+                if dname not in min_time or t < min_time[dname]:
+                    min_time[dname] = t
+                hours_reached[dname].add(start_min // 60)
 
         fast = medium = slow = 0
         pairs = []
+        n_hours = max(1, (window_hi - window_lo) // 60)
         for dname in top_name_list:
             if dname == origin["name"]:
                 continue
-            ts = times.get(dname, [])
+            t_best = min_time.get(dname)
             haversine_dist = haversine_km(
                 origin["lat"], origin["lon"], *top_coords[dname],
             )
@@ -635,7 +646,11 @@ def load_rankings_data(
             dist = rail_dist.get(dest_ptc) if dest_ptc else None
             if dist is None or dist <= 0:
                 dist = haversine_dist
-            if not ts:
+            # Require the destination to be reachable in at least half of the
+            # hours in the window, to avoid reporting fluke single-hour speeds.
+            reachable_hours = len(hours_reached.get(dname, set()))
+            enough = reachable_hours >= max(1, n_hours // 2)
+            if t_best is None or not enough:
                 pairs.append({
                     "dest": dname,
                     "avg_time_min": None,
@@ -643,7 +658,7 @@ def load_rankings_data(
                     "speed_kmh": None,
                 })
                 continue
-            avg_t = sum(ts) / len(ts)
+            avg_t = t_best
             speed = (dist / (avg_t / 60.0)) if avg_t > 0 else 0
             pairs.append({
                 "dest": dname,
