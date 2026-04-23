@@ -1,7 +1,8 @@
 import { createRoute } from "@tanstack/react-router";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ListOrdered } from "lucide-react";
+import type { Layer } from "@deck.gl/core";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
@@ -15,11 +16,16 @@ import { ErrorAlert } from "@/components/ErrorAlert";
 import { ApplyButton } from "@/components/ApplyButton";
 import { DataTable } from "@/components/DataTable";
 import { MethodologyPanel } from "@/components/MethodologyPanel";
+import { MapViewBar, mapViewTooltip } from "@/components/MapViewBar";
+import { DeckMap, type DeckMapRef } from "@/components/DeckMap";
+import { ColorLegend } from "@/components/ColorLegend";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchApi } from "@/lib/api";
 import { filterParams, fmt, daysAgo, today } from "@/lib/utils";
+import { stationLayer, colorToRGBA } from "@/lib/layers";
+import { useMapView, type MetricOption } from "@/hooks/useMapView";
 
 export const rankingsRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -91,6 +97,11 @@ function minutesToClock(m: number): string {
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}${dayWrap}`;
 }
 
+const METRICS: MetricOption[] = [
+  { key: "reachable", label: "Reachable stations", accessor: (d: any) => d.reachable },
+  { key: "trains_per_day", label: "Trains / day", accessor: (d: any) => d.trains_per_day, suffix: "" },
+];
+
 function RankingsPage() {
   const [filters, setFilters] = useState<Filters>({
     startDate: daysAgo(7),
@@ -111,20 +122,62 @@ function RankingsPage() {
   const [speedDepEnd, setSpeedDepEnd] = useState(20);
   const [topN, setTopN] = useState(20);
 
-  const [reachTab, setReachTab] = useState<ReachTab>("all");
-  const [trainTab, setTrainTab] = useState<TrainTab>("all");
-  const [lastTab, setLastTab] = useState<TrainTab>("all");
+  const [reachTab, setReachTab] = useState<ReachTab>("xl");
+  const [trainTab, setTrainTab] = useState<TrainTab>("xl");
+  const [lastTab, setLastTab] = useState<TrainTab>("xl");
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("reachable");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const [queryParams, setQueryParams] = useState<Record<string, string | number | boolean> | null>(null);
+  const mapRef = useRef<DeckMapRef>(null);
 
   const { data, error, isFetching } = useQuery({
     queryKey: ["rankings", queryParams],
     queryFn: () => fetchApi<RankingsData>("/rankings", queryParams!),
     enabled: !!queryParams,
   });
+
+  const { data: geoData } = useQuery({
+    queryKey: ["provinces"],
+    queryFn: () => fetchApi<any>("/provinces"),
+  });
+
+  const mapView = useMapView<RankingStation>({
+    data: data?.stations ?? [],
+    geoData,
+    getLon: (d) => d.lon,
+    getLat: (d) => d.lat,
+    metrics: METRICS,
+    showGradient: true,
+    defaultViewMode: "provinces",
+  });
+
+  const stationLayers = useMemo<Layer[]>(() => {
+    const stations = mapView.filtered;
+    if (!stations.length) return [];
+    const accessor = mapView.activeMetric.accessor;
+    const vals = stations.map(accessor);
+    const maxVal = Math.max(...vals, 1);
+    const minVal = Math.min(...vals, 0);
+    const spread = Math.max(maxVal - minVal, 1);
+    return [
+      stationLayer("rankings-stations", stations, {
+        positionFn: (d) => [d.lon, d.lat],
+        radiusFn: (d) => 3 + ((accessor(d) - minVal) / spread) * 18,
+        colorFn: (d) => {
+          const [r, g, b] = colorToRGBA((accessor(d) - minVal) / spread);
+          return [r, g, b, 230];
+        },
+        radiusScale: 1,
+        radiusMinPixels: 3,
+        radiusMaxPixels: 40,
+        pickable: true,
+      }) as Layer,
+    ];
+  }, [mapView.filtered, mapView.activeMetric]);
+
+  const mapLayers = mapView.isOverlayView ? mapView.overlayLayers : stationLayers;
 
   const loadData = () =>
     setQueryParams({
@@ -312,6 +365,47 @@ function RankingsPage() {
             <MetricCard label="Top Trains/day" value={topTrains} />
             <MetricCard label="Latest Train" value={latestTrain} />
           </div>
+
+          <section className="bg-card rounded-2xl border border-border/60 mb-4 shadow-sm">
+            <div className="px-4 py-3 border-b border-border/40">
+              <h3 className="text-sm font-semibold text-foreground">Aggregate map view</h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Per-station, per-province or per-region aggregation of reach and trains/day.
+              </p>
+            </div>
+            <div className="p-4 space-y-2">
+              <MapViewBar
+                viewMode={mapView.viewMode}
+                onViewModeChange={mapView.setViewMode}
+                choroplethMetric={mapView.choroplethMetric}
+                onChoroplethMetricChange={mapView.setChoroplethMetric}
+                metrics={mapView.metrics}
+                showGradient={mapView.showGradient}
+                activeMetric={mapView.activeMetric}
+                isOverlayView={mapView.isOverlayView}
+              />
+              <DeckMap
+                ref={mapRef}
+                layers={mapLayers}
+                className="h-[420px]"
+                getTooltip={(info) => {
+                  if (!mapView.isOverlayView) {
+                    const { object, layer } = info;
+                    if (!object || !layer) return null;
+                    if (layer.id !== "rankings-stations") return null;
+                    return {
+                      html: `<div style="font-size:12px"><b>${object.name}</b><br/>${mapView.activeMetric.label}: ${fmt(mapView.activeMetric.accessor(object), 1)}<br/>${object.region}</div>`,
+                      style: { backgroundColor: "rgba(255,255,255,0.95)", color: "#111", padding: "6px 8px", borderRadius: "8px", border: "1px solid #e5e7eb", boxShadow: "0 2px 8px rgba(0,0,0,0.12)" },
+                    };
+                  }
+                  return mapViewTooltip(mapView.activeMetric, info);
+                }}
+              />
+              {!mapView.isOverlayView && (
+                <ColorLegend min={`Low ${mapView.activeMetric.label}`} max={`High ${mapView.activeMetric.label}`} />
+              )}
+            </div>
+          </section>
 
           <section className="bg-card rounded-2xl border border-border/60 mb-4 shadow-sm">
             <div className="px-4 py-3 border-b border-border/40 flex items-center justify-between flex-wrap gap-2">

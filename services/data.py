@@ -466,13 +466,12 @@ def load_rankings_data(
     stations = list(by_name.values())
 
     # Commercial speed between the top_n busiest stations, over the configured
-    # speed window (default 8h–20h). For each hourly clock start, run a single-
-    # start BFS from origin A and record best arrival at each top-destination B
-    # (waiting at A is counted in the travel time). Average across hours where
-    # B was reachable. speed = haversine(A, B) / avg_time.
-    # This is an approximation — not a true schedule-weighted mean. Pairs with
-    # poor connectivity have an upward travel-time bias because waiting at A
-    # is included.
+    # speed window (default 8h–20h). For each origin we sample one ACTUAL train
+    # departure per hour inside the window — this keeps the initial wait at the
+    # origin near zero, so travel_time approximates real in-vehicle time. BFS
+    # runs with stop_lookup so each reachable destination carries the cumulative
+    # path haversine distance (rail-following) rather than crow-flies. Speed is
+    # the average across sampled starts of (path_km / travel_hours).
     speed_candidates = sorted(
         stations, key=lambda s: -s["trains_per_day"],
     )[:top_n]
@@ -481,21 +480,42 @@ def load_rankings_data(
     top_coords = {s["name"]: (s["lat"], s["lon"]) for s in speed_candidates}
 
     speed_budget_min = 4 * 60
-    starts = list(range(speed_dep_start * 60, speed_dep_end * 60, 60))
+    window_lo = speed_dep_start * 60
+    window_hi = speed_dep_end * 60
 
     _dep_times = _precompute_dep_times(departures)
     commercial_speeds = []
     for origin in speed_candidates:
         origin_sid = origin["id"]
+
+        # Sample starts: pick the first actual departure in each hour of the
+        # window. This makes initial wait ≈ 0 for the optimal path.
+        origin_deps = sorted(
+            dep_min for dep_min, _, _, _
+            in departures.get(origin_sid, [])
+            if window_lo <= dep_min < window_hi
+        )
+        seen_hours: set[int] = set()
+        starts: list[int] = []
+        for dm in origin_deps:
+            h = dm // 60
+            if h not in seen_hours:
+                seen_hours.add(h)
+                starts.append(dm)
+        if not starts:
+            starts = list(range(window_lo, window_hi, 60))
+
         times: dict[str, list[float]] = defaultdict(list)
+        dists: dict[str, list[float]] = defaultdict(list)
         for start_min in starts:
             r = _bfs_single(
                 origin_sid, departures, speed_budget_min, start_min,
+                stop_lookup=stop_lookup,
                 max_transfers=max_transfers,
                 transfer_penalty_min=min_transfer_time,
                 _dep_times=_dep_times,
             )
-            per_name: dict[str, float] = {}
+            per_name: dict[str, tuple[float, float]] = {}
             for dest_id, info in r.items():
                 d = stop_lookup.get(dest_id)
                 if not d:
@@ -504,10 +524,13 @@ def load_rankings_data(
                 if dname not in top_names or dname == origin["name"]:
                     continue
                 t = info["travel_time"]
-                if dname not in per_name or t < per_name[dname]:
-                    per_name[dname] = t
-            for dname, t in per_name.items():
+                dist = info.get("distance_km", 0.0)
+                prev = per_name.get(dname)
+                if prev is None or t < prev[0]:
+                    per_name[dname] = (t, dist)
+            for dname, (t, dist) in per_name.items():
                 times[dname].append(t)
+                dists[dname].append(dist)
 
         fast = medium = slow = 0
         pairs = []
@@ -515,23 +538,23 @@ def load_rankings_data(
             if dname == origin["name"]:
                 continue
             ts = times.get(dname, [])
+            ds = dists.get(dname, [])
+            haversine_dist = haversine_km(
+                origin["lat"], origin["lon"], *top_coords[dname],
+            )
             if not ts:
                 pairs.append({
                     "dest": dname,
                     "avg_time_min": None,
-                    "distance_km": round(
-                        haversine_km(
-                            origin["lat"], origin["lon"],
-                            *top_coords[dname],
-                        ), 1,
-                    ),
+                    "distance_km": round(haversine_dist, 1),
                     "speed_kmh": None,
                 })
                 continue
             avg_t = sum(ts) / len(ts)
-            dist = haversine_km(
-                origin["lat"], origin["lon"], *top_coords[dname],
-            )
+            # Rail path distance. Fall back to crow-flies if path tracking
+            # produced zero (can happen for single-hop trivial cases).
+            avg_path = sum(ds) / len(ds) if ds else 0.0
+            dist = avg_path if avg_path > 0 else haversine_dist
             speed = (dist / (avg_t / 60.0)) if avg_t > 0 else 0
             pairs.append({
                 "dest": dname,
