@@ -22,8 +22,6 @@ import {
   AreaChart,
   Area,
   Cell,
-  PieChart,
-  Pie,
   ScatterChart,
   Scatter,
   ZAxis,
@@ -158,15 +156,25 @@ interface OptBufferPoint {
 
 interface OptRecommendation {
   station: string;
-  total_missed: number;
-  total_planned: number;
-  pct_missed: number;
+  arr_train: string;
+  dep_train: string;
+  rel_arr: string;
+  rel_dep: string;
+  dep_hour: number | null;
+  avg_gap_min: number | null;
   delta_min: number;
-  saved_local: number;
+  n_saves: number;
   new_misses_downstream: number;
   saved_downstream: number;
   net_benefit: number;
-  net_pct_of_station: number;
+  avg_overshoot_sec: number;
+  dow: number | null;
+  dow_label: string | null;
+  pair_total_missed: number;
+  pair_total_occ: number;
+  top_dow: number;
+  top_dow_label: string;
+  dow_concentration_pct: number;
 }
 
 interface OptQuickWin {
@@ -230,6 +238,7 @@ interface MissedReportData {
   weather: WeatherSection | null;
   weather_sensitive_trains?: WeatherSensitiveTrain[];
   optimization?: Optimization | null;
+  gap_stats?: { gap_min: number; planned: number; missed: number; pct_missed: number }[];
   error?: string;
 }
 
@@ -460,17 +469,6 @@ function MissedReportPage() {
         label: `${h.hour}h`,
         isRush: (h.hour >= 7 && h.hour < 9) || (h.hour >= 17 && h.hour < 19),
       }));
-  }, [data]);
-
-  const pieData = useMemo(() => {
-    if (!data) return [];
-    const cc = data.lucky.total_close_calls;
-    const missed = data.overview.total_missed;
-    if (cc + missed === 0) return [];
-    return [
-      { name: "Close call — made it", value: cc, fill: "oklch(0.64 0.17 150)" },
-      { name: "Missed", value: missed, fill: "oklch(0.58 0.22 25)" },
-    ];
   }, [data]);
 
   const [stationSort, setStationSort] = useState<"pct" | "impact">("impact");
@@ -739,7 +737,7 @@ function MissedReportPage() {
                 )}>
                   <Stat value={<Counter end={ov.total_connections} visible={heroVisible} duration={2000} />} label="planned" />
                   <Stat value={<><Counter end={ov.pct_missed} visible={heroVisible} decimals={1} suffix="%" duration={2000} /></>} label="failure rate" danger />
-                  <Stat value={<Counter end={ov.close_calls} visible={heroVisible} duration={2000} />} label="close calls" subtle />
+                  <Stat value={<Counter end={Math.round(data.added_wait.avg_wait_min)} visible={heroVisible} suffix=" min" duration={2000} />} label="avg wait after miss" subtle />
                 </div>
 
                 <ChevronDown className="w-5 h-5 text-muted-foreground/20 animate-scroll-bounce mx-auto mt-16 print:hidden" />
@@ -1152,37 +1150,40 @@ function MissedReportPage() {
               </StorySection>
             )}
 
-            {/* ── CLOSE CALLS & WAIT ── */}
+            {/* ── MISS RATE BY GAP, WAIT, AND DAILY TREND ── */}
             <StorySection id="close-calls" className="mt-28 print:mt-12">
-              <Heading>Close calls & waiting</Heading>
+              <Heading>Tightness and recovery</Heading>
               <p className="text-sm text-muted-foreground/60 -mt-4 mb-5">
-                A <b className="text-foreground/70">close call</b> is a connection where the passenger made
-                the transfer, but with less than {closeCallSec < 60 ? `${closeCallSec} seconds` : `${Math.round(closeCallSec / 60)} minute${closeCallSec >= 120 ? "s" : ""}`} to spare between actual arrival and actual departure.
+                How often a planned transfer breaks depending on how many minutes of slack it had,
+                how long passengers end up waiting for the next train, and how the total number of
+                broken connections evolves day by day.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                <Card className="flex flex-col items-center justify-center text-center py-8">
-                  {pieData.length > 0 && (
-                    <>
-                      <ResponsiveContainer width={180} height={180}>
-                        <PieChart>
-                          <Pie data={pieData} cx="50%" cy="50%" innerRadius={50} outerRadius={72} paddingAngle={4} dataKey="value">
-                            {pieData.map((e, i) => <Cell key={i} fill={e.fill} />)}
-                          </Pie>
-                          <Tooltip contentStyle={TT} formatter={(v: number) => [fmt(v), ""]} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                      <div className="flex gap-4 text-[10px] text-muted-foreground mt-2 mb-4">
-                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-success" /> Close call</span>
-                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-destructive" /> Missed</span>
-                      </div>
-                    </>
-                  )}
-                  <p className="text-sm text-muted-foreground leading-relaxed max-w-xs">
-                    Of the <b className="text-foreground">{fmt(data.lucky.total_close_calls + ov.total_missed)}</b> connections
-                    where timing was tight (&lt; {closeCallSec}s margin),{" "}
-                    <b className="text-success">{data.lucky.pct_saved}%</b> still made it
-                    and <b className="text-destructive">{(100 - data.lucky.pct_saved).toFixed(1)}%</b> were missed.
+                <Card>
+                  <CardLabel>Miss rate by planned transfer slack</CardLabel>
+                  <p className="text-xs text-muted-foreground/50 mb-3">
+                    For every planned connection with X minutes of slack between arrival and departure,
+                    what fraction actually broke. Tight transfers are fragile; slack is cheap insurance.
                   </p>
+                  {data.gap_stats && data.gap_stats.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={data.gap_stats} margin={{ top: 4, right: 8, bottom: 4, left: -8 }}>
+                        <XAxis dataKey="gap_min" tick={{ fontSize: 10 }} tickFormatter={(v) => `${v}m`} />
+                        <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${v}%`} />
+                        <Tooltip
+                          contentStyle={TT}
+                          formatter={(v: number, _n, ctx) => {
+                            const p = (ctx.payload as { planned: number; missed: number; gap_min: number });
+                            return [`${v}% (${fmt(p.missed)}/${fmt(p.planned)})`, `${p.gap_min} min slack`];
+                          }}
+                          labelFormatter={() => ""}
+                        />
+                        <Bar dataKey="pct_missed" fill="oklch(0.58 0.22 25)" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Not enough data for this breakdown.</p>
+                  )}
                 </Card>
 
                 {data.added_wait.histogram.length > 0 && (
@@ -1205,6 +1206,32 @@ function MissedReportPage() {
                   </Card>
                 )}
               </div>
+
+              {data.daily.length > 1 && (
+                <Card className="mt-5">
+                  <CardLabel>Daily evolution — broken connections over the selected period</CardLabel>
+                  <p className="text-xs text-muted-foreground/50 mb-3">
+                    Absolute number of missed connections per day. Weekends typically drop with
+                    lighter service; weekday spikes often coincide with weather events or
+                    infrastructure incidents.
+                  </p>
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={data.daily.filter((d) => d.planned > 0)} margin={{ top: 4, right: 8, bottom: 4, left: -8 }}>
+                      <XAxis dataKey="date" tick={{ fontSize: 9 }} tickFormatter={(v) => v.slice(5)} interval="preserveStartEnd" />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                      <Tooltip
+                        contentStyle={TT}
+                        formatter={(v: number, _n, ctx) => {
+                          const p = ctx.payload as { planned: number; missed: number; pct: number; dow_label: string };
+                          return [`${fmt(v)} missed · ${p.pct}% of ${fmt(p.planned)}`, p.dow_label];
+                        }}
+                        labelFormatter={(l) => String(l)}
+                      />
+                      <Bar dataKey="missed" fill="oklch(0.58 0.22 25)" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Card>
+              )}
             </StorySection>
 
             {/* ── WEATHER IMPACT ── */}
@@ -1546,42 +1573,74 @@ function MissedReportPage() {
                 {/* Recommendations */}
                 <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
                   <Lightbulb className="w-4 h-4 text-amber-500" />
-                  Top recommendations
+                  Top recommendations — targeted train holds
                 </h3>
                 <p className="text-[10px] text-muted-foreground/50 mb-4">
-                  Each recommendation accounts for downstream propagation: delaying a departing train here
-                  means it arrives later at subsequent stations, potentially breaking other connections.
-                  Green = net connections saved after accounting for all network effects.
+                  Each row names a specific station + train pair. The <b>departing train</b>
+                  could be held for a few extra minutes to wait for the <b>arriving train</b>,
+                  which repeatedly arrives too late to transfer. Some patterns are
+                  concentrated on specific weekdays — in those cases we recommend a
+                  conditional hold (e.g. Mondays only). Net benefit subtracts any new
+                  misses caused by the held train arriving later at downstream stations.
                 </p>
                 <div className="space-y-2 mb-6">
                   {data.optimization.recommendations.map((rec, i) => {
                     const maxNet = data.optimization!.recommendations[0]?.net_benefit ?? 1;
                     const barW = Math.max((rec.net_benefit / maxNet) * 100, 4);
+                    const dowDetected = rec.dow_concentration_pct >= 35 && rec.pair_total_missed >= 5;
+                    const key = `${rec.station}|${rec.arr_train}|${rec.dep_train}|${rec.dow ?? 'all'}`;
                     return (
-                      <div key={rec.station} className="rounded-2xl border border-border/40 bg-card px-5 py-3 shadow-sm">
+                      <div key={key} className="rounded-2xl border border-border/40 bg-card px-5 py-3 shadow-sm">
                         <div className="flex items-center gap-4">
                           <span className="text-lg font-black text-muted-foreground/30 w-6 text-right shrink-0">{i + 1}</span>
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-baseline justify-between mb-1">
+                            <div className="flex items-baseline justify-between mb-1 gap-2">
                               <div className="min-w-0">
                                 <span className="text-sm font-bold">{titleCase(rec.station)}</span>
-                                <span className="text-[10px] text-muted-foreground/50 ml-2">+{rec.delta_min} min buffer</span>
+                                {rec.dep_hour !== null && (
+                                  <span className="text-[10px] text-muted-foreground/40 ml-2">~{String(rec.dep_hour).padStart(2, '0')}:00</span>
+                                )}
+                                {rec.dow_label ? (
+                                  <span className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 font-semibold">
+                                    {rec.dow_label}s only
+                                  </span>
+                                ) : dowDetected ? (
+                                  <span className="text-[10px] ml-2 text-muted-foreground/50">
+                                    (peaks {rec.top_dow_label}, {rec.dow_concentration_pct}% of misses)
+                                  </span>
+                                ) : null}
                               </div>
                               <div className="text-right ml-2 shrink-0">
                                 <span className="text-xl font-black text-emerald-600 tabular-nums">+{rec.net_benefit}</span>
                                 <p className="text-[9px] text-muted-foreground/50">net saved</p>
                               </div>
                             </div>
+                            <div className="text-[11px] text-muted-foreground/70 mb-1.5 leading-snug">
+                              Hold train <span className="font-mono font-semibold text-foreground">{rec.dep_train}</span>
+                              {rec.rel_dep && <span className="text-muted-foreground/50"> ({titleCase(rec.rel_dep)})</span>}
+                              <span> by <b>+{rec.delta_min} min</b> to catch </span>
+                              <span className="font-mono font-semibold text-foreground">{rec.arr_train}</span>
+                              {rec.rel_arr && <span className="text-muted-foreground/50"> ({titleCase(rec.rel_arr)})</span>}
+                              {rec.avg_overshoot_sec > 0 && (
+                                <span className="text-muted-foreground/50"> — typically {Math.round(rec.avg_overshoot_sec)}s late</span>
+                              )}
+                            </div>
                             <div className="h-2 rounded-full bg-muted/60 overflow-hidden mb-1.5">
                               <div className="h-full rounded-full bg-emerald-500/70 transition-all duration-700" style={{ width: `${barW}%` }} />
                             </div>
                             <div className="flex items-center gap-1 text-[10px] text-muted-foreground/50 flex-wrap">
-                              <span className="text-emerald-600 font-semibold">+{rec.saved_local} saved locally</span>
+                              <span className="text-emerald-600 font-semibold">+{rec.n_saves} caught here</span>
                               <ArrowRight className="w-2.5 h-2.5" />
-                              <span className="text-destructive font-semibold">-{rec.new_misses_downstream} broken downstream</span>
-                              <ArrowRight className="w-2.5 h-2.5" />
-                              <span className="text-emerald-600 font-semibold">+{rec.saved_downstream} saved downstream</span>
-                              <span className="ml-auto">({rec.net_pct_of_station}% of station misses)</span>
+                              <span className={rec.new_misses_downstream > 0 ? "text-destructive font-semibold" : "text-muted-foreground/40"}>
+                                -{rec.new_misses_downstream} broken downstream
+                              </span>
+                              {rec.saved_downstream > 0 && (
+                                <>
+                                  <ArrowRight className="w-2.5 h-2.5" />
+                                  <span className="text-emerald-600 font-semibold">+{rec.saved_downstream} saved downstream</span>
+                                </>
+                              )}
+                              <span className="ml-auto">{rec.pair_total_missed}/{rec.pair_total_occ} pair misses total</span>
                             </div>
                           </div>
                         </div>
@@ -1619,9 +1678,9 @@ function MissedReportPage() {
                 )}
 
                 <Callout>
-                  By optimizing buffer times at just the top {data.optimization.recommendations.length} stations
-                  (accounting for network propagation effects),
-                  we could save an estimated <b className="text-emerald-600">{fmt(data.optimization.total_net_saveable)} connections</b> ({data.optimization.net_saveable_pct}% of all misses).
+                  Targeted holds on just these {data.optimization.recommendations.length} train pairs
+                  (accounting for downstream network effects) could save an estimated{' '}
+                  <b className="text-emerald-600">{fmt(data.optimization.total_net_saveable)} connections</b> ({data.optimization.net_saveable_pct}% of all misses).
                   {data.optimization.barely_missed_pct > 30 && <> Notably, <b>{data.optimization.barely_missed_pct}%</b> of all missed connections
                   were missed by less than 3 minutes — small schedule adjustments could have large effects.</>}
                 </Callout>
@@ -1872,7 +1931,7 @@ function HubCard({ hub }: { hub: HubSpotlight }) {
           <div className="grid grid-cols-3 gap-3 text-center">
             <MiniStat value={fmt(hub.summary.missed)} label="missed" danger />
             <MiniStat value={`${hub.summary.pct}%`} label="fail rate" />
-            <MiniStat value={fmt(hub.summary.close_calls)} label="close calls" />
+            <MiniStat value={fmt(hub.summary.daily_trains)} label="trains/day" />
           </div>
         </div>
 

@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   Link2,
   CloudRain,
+  Ban,
   type LucideIcon,
 } from "lucide-react";
 
@@ -36,6 +37,7 @@ export const PAGES: PageInfo[] = [
   { slug: "problematic", title: "Problematic Trains", shortTitle: "Problem.", icon: AlertTriangle, desc: "Consistently late trains", gradient: "from-red-500/15 to-rose-500/5" },
   { slug: "missed", title: "Missed Connections", shortTitle: "Missed", icon: Link2, desc: "Broken transfers due to delays", gradient: "from-fuchsia-500/15 to-pink-500/5" },
   { slug: "weather", title: "Weather & Delays", shortTitle: "Weather", icon: CloudRain, desc: "Weather impact on train punctuality", gradient: "from-sky-500/15 to-blue-500/5" },
+  { slug: "deleted", title: "Deleted Trains", shortTitle: "Deleted", icon: Ban, desc: "Scheduled trains that never ran", gradient: "from-red-500/15 to-rose-500/5" },
 ];
 
 export const MAP_CENTER: [number, number] = [50.5, 4.35];

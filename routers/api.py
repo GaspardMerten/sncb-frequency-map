@@ -1524,6 +1524,7 @@ async def api_missed_report(
         all_wait_times: list[float] = []
         all_train_routes: list[pd.DataFrame] = []
         all_train_daily: list[pd.DataFrame] = []  # per-train per-day delay for weather sensitivity
+        all_gap_stats: list[pd.DataFrame] = []  # per-chunk miss% by planned-gap-minute
         all_opt_data: list[dict] = []  # per-chunk DuckDB optimization results
         station_coords: dict[str, dict] = {}
 
@@ -1741,6 +1742,18 @@ async def api_missed_report(
             """).fetchdf()
             if not wait.empty:
                 all_wait_times.extend(wait["wait_min"].tolist())
+
+            # Miss rate bucketed by planned transfer gap (in minutes). Gives the
+            # "how tight a transfer survives" curve.
+            gap_stats_chunk = con.execute("""
+                SELECT CAST(gap / 60 AS INTEGER) AS gap_min,
+                       COUNT(*) AS planned,
+                       SUM(missed) AS missed
+                FROM connections
+                GROUP BY gap_min
+            """).fetchdf()
+            if not gap_stats_chunk.empty:
+                all_gap_stats.append(gap_stats_chunk)
 
             # ---- Corridor queries: actual train-level connections at Brussels ----
             for cp in _CORRIDOR_PAIRS:
@@ -2497,6 +2510,30 @@ async def api_missed_report(
         total_wait = sum(wait_times)
         pct_missed = round(total_missed / max(total_planned, 1) * 100, 1)
 
+        # Miss% per planned-gap minute (within [min_transfer, max_transfer])
+        if all_gap_stats:
+            gap_merged = pd.concat(all_gap_stats, ignore_index=True)
+            gap_merged = (
+                gap_merged.groupby("gap_min", as_index=False)
+                [["planned", "missed"]].sum()
+                .sort_values("gap_min")
+            )
+            gap_stats = [
+                {
+                    "gap_min": int(r["gap_min"]),
+                    "planned": int(r["planned"]),
+                    "missed": int(r["missed"]),
+                    "pct_missed": round(
+                        float(r["missed"]) / max(float(r["planned"]), 1.0) * 100.0, 2,
+                    ),
+                }
+                for _, r in gap_merged.iterrows()
+                if min_transfer <= int(r["gap_min"]) <= max_transfer
+            ]
+        else:
+            gap_stats = []
+        del all_gap_stats
+
         overview = {
             "total_connections": total_planned,
             "total_missed": total_missed,
@@ -2723,6 +2760,7 @@ async def api_missed_report(
             "weather": weather_section,
             "weather_sensitive_trains": weather_trains,
             "optimization": optimization,
+            "gap_stats": gap_stats,
         }
 
 
