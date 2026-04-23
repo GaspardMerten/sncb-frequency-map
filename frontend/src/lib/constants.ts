@@ -1,6 +1,7 @@
 import {
   Train,
   MapPin,
+  ListOrdered,
   BarChart3,
   Timer,
   Bus,
@@ -25,6 +26,7 @@ export interface PageInfo {
 export const PAGES: PageInfo[] = [
   { slug: "segments", title: "Segment Frequency", shortTitle: "Segments", icon: Train, desc: "Train frequencies per track segment", gradient: "from-blue-500/15 to-indigo-500/5" },
   { slug: "reach", title: "Station Reach", shortTitle: "Reach", icon: MapPin, desc: "Reachable stations within a time budget", gradient: "from-emerald-500/15 to-teal-500/5" },
+  { slug: "rankings", title: "Station Rankings", shortTitle: "Rankings", icon: ListOrdered, desc: "Reach, trains/day, last train, commercial speed", gradient: "from-teal-500/15 to-emerald-500/5" },
   { slug: "connectivity", title: "Station Connectivity", shortTitle: "Connect.", icon: BarChart3, desc: "Multi-dimensional station comparison", gradient: "from-violet-500/15 to-purple-500/5" },
   { slug: "duration", title: "Travel Duration", shortTitle: "Duration", icon: Timer, desc: "Travel time to any destination", gradient: "from-amber-500/15 to-orange-500/5" },
   { slug: "multimodal", title: "Multimodal Duration", shortTitle: "Multimodal", icon: Bus, desc: "Door-to-door with all operators", gradient: "from-cyan-500/15 to-sky-500/5" },
