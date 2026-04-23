@@ -352,6 +352,54 @@ def load_reach_data(
     }
 
 
+def _build_infra_rail_graph(infrabel_segs: dict | None) -> dict[str, dict[str, float]]:
+    """Undirected graph of Infrabel ptcarid -> {ptcarid: shortest segment length km}.
+
+    Parallel segments between the same pair of stations are collapsed to the
+    minimum length (real track distance between operational points).
+    """
+    from logic.geo import polyline_length_km
+
+    graph: dict[str, dict[str, float]] = defaultdict(dict)
+    if not infrabel_segs or "features" not in infrabel_segs:
+        return graph
+    for feat in infrabel_segs["features"]:
+        props = feat.get("properties", {})
+        a = str(props.get("stationfrom_id", "")).strip()
+        b = str(props.get("stationto_id", "")).strip()
+        if not a or not b or a == b:
+            continue
+        coords = feat.get("geometry", {}).get("coordinates", [])
+        if not coords:
+            continue
+        length = polyline_length_km(coords)
+        if length <= 0:
+            continue
+        if b not in graph[a] or graph[a][b] > length:
+            graph[a][b] = length
+            graph[b][a] = length
+    return graph
+
+
+def _rail_distance_from(origin: str, graph: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Dijkstra on the Infrabel rail graph. Returns ptcarid -> distance km."""
+    import heapq
+    if origin not in graph:
+        return {}
+    dist: dict[str, float] = {origin: 0.0}
+    pq: list[tuple[float, str]] = [(0.0, origin)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist.get(u, float("inf")):
+            continue
+        for v, w in graph[u].items():
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                heapq.heappush(pq, (nd, v))
+    return dist
+
+
 @cached(ttl=3600)
 def load_rankings_data(
     start_date: date,
@@ -468,10 +516,11 @@ def load_rankings_data(
     # Commercial speed between the top_n busiest stations, over the configured
     # speed window (default 8h–20h). For each origin we sample one ACTUAL train
     # departure per hour inside the window — this keeps the initial wait at the
-    # origin near zero, so travel_time approximates real in-vehicle time. BFS
-    # runs with stop_lookup so each reachable destination carries the cumulative
-    # path haversine distance (rail-following) rather than crow-flies. Speed is
-    # the average across sampled starts of (path_km / travel_hours).
+    # origin near zero, so travel_time approximates real in-vehicle time.
+    # Distance is the true rail distance from the Infrabel segment network
+    # (shortest path over stationfrom_id/stationto_id segment lengths), with a
+    # haversine fallback when either endpoint isn't in the Infrabel graph.
+    # Speed is (rail_km / average_travel_hours) over sampled starts.
     speed_candidates = sorted(
         stations, key=lambda s: -s["trains_per_day"],
     )[:top_n]
@@ -482,6 +531,13 @@ def load_rankings_data(
     speed_budget_min = 4 * 60
     window_lo = speed_dep_start * 60
     window_hi = speed_dep_end * 60
+
+    # Build the Infrabel rail graph once. Rail distance = shortest path over
+    # actual track segment lengths. Falls back to haversine crow-flies for
+    # pairs that aren't connected in the Infrabel network.
+    infra_graph = _build_infra_rail_graph(data.get("infrabel_segs"))
+    gtfs_to_infra = data.get("gtfs_to_infra", {})
+    dest_ptc_by_name = {s["name"]: gtfs_to_infra.get(s["id"]) for s in speed_candidates}
 
     _dep_times = _precompute_dep_times(departures)
     commercial_speeds = []
@@ -505,17 +561,19 @@ def load_rankings_data(
         if not starts:
             starts = list(range(window_lo, window_hi, 60))
 
+        # Per-origin Dijkstra on the Infrabel rail graph
+        origin_ptc = gtfs_to_infra.get(origin_sid)
+        rail_dist = _rail_distance_from(origin_ptc, infra_graph) if origin_ptc else {}
+
         times: dict[str, list[float]] = defaultdict(list)
-        dists: dict[str, list[float]] = defaultdict(list)
         for start_min in starts:
             r = _bfs_single(
                 origin_sid, departures, speed_budget_min, start_min,
-                stop_lookup=stop_lookup,
                 max_transfers=max_transfers,
                 transfer_penalty_min=min_transfer_time,
                 _dep_times=_dep_times,
             )
-            per_name: dict[str, tuple[float, float]] = {}
+            per_name: dict[str, float] = {}
             for dest_id, info in r.items():
                 d = stop_lookup.get(dest_id)
                 if not d:
@@ -524,13 +582,10 @@ def load_rankings_data(
                 if dname not in top_names or dname == origin["name"]:
                     continue
                 t = info["travel_time"]
-                dist = info.get("distance_km", 0.0)
-                prev = per_name.get(dname)
-                if prev is None or t < prev[0]:
-                    per_name[dname] = (t, dist)
-            for dname, (t, dist) in per_name.items():
+                if dname not in per_name or t < per_name[dname]:
+                    per_name[dname] = t
+            for dname, t in per_name.items():
                 times[dname].append(t)
-                dists[dname].append(dist)
 
         fast = medium = slow = 0
         pairs = []
@@ -538,23 +593,22 @@ def load_rankings_data(
             if dname == origin["name"]:
                 continue
             ts = times.get(dname, [])
-            ds = dists.get(dname, [])
             haversine_dist = haversine_km(
                 origin["lat"], origin["lon"], *top_coords[dname],
             )
+            dest_ptc = dest_ptc_by_name.get(dname)
+            dist = rail_dist.get(dest_ptc) if dest_ptc else None
+            if dist is None or dist <= 0:
+                dist = haversine_dist
             if not ts:
                 pairs.append({
                     "dest": dname,
                     "avg_time_min": None,
-                    "distance_km": round(haversine_dist, 1),
+                    "distance_km": round(dist, 1),
                     "speed_kmh": None,
                 })
                 continue
             avg_t = sum(ts) / len(ts)
-            # Rail path distance. Fall back to crow-flies if path tracking
-            # produced zero (can happen for single-hop trivial cases).
-            avg_path = sum(ds) / len(ds) if ds else 0.0
-            dist = avg_path if avg_path > 0 else haversine_dist
             speed = (dist / (avg_t / 60.0)) if avg_t > 0 else 0
             pairs.append({
                 "dest": dname,
