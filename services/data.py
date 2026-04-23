@@ -428,6 +428,36 @@ def load_rankings_data(
     day, and each sub-metric defines its own hour window
     (``dep_start``/``dep_end`` for reach, ``speed_dep_start``/
     ``speed_dep_end`` for commercial speed).
+
+    Metric definitions:
+      * ``trains_per_day`` = ``max(in_freq, out_freq)`` over daily-averaged
+        segment frequencies. Counts trains stopping at the station (handles
+        through, terminating and starting trains correctly — each train
+        increments both counters for through stations and one counter for
+        terminus stops).
+      * ``last_train_str`` = latest outgoing ``dep_min`` observed at the
+        chosen stop_id. Stations that only receive trains have no value.
+      * ``reachable`` = ``|{station_ids reachable within time_budget hours}|``
+        using BFS over the GTFS timetable graph, with the same transfer
+        penalties as the /reach endpoint.
+      * ``commercial_speeds[].speed_kmh`` = ``rail_km / average(travel_time)``
+        where:
+          - ``rail_km`` is the shortest-path distance over the Infrabel track
+            segment graph (falls back to crow-flies haversine when either
+            endpoint isn't mapped to an Infrabel ptcarid). Note this is the
+            shortest *track* route — if the BFS-optimal train takes a longer
+            route (e.g., via Brussels), the speed will be slightly
+            under-reported relative to the actual on-train experience.
+          - ``travel_time`` is ``arr_min - start_min`` from ``_bfs_single``.
+            Starts are the first actual origin departure in each hour of
+            ``[speed_dep_start, speed_dep_end)``, which drives the initial
+            wait at origin toward zero for the optimal path. Residual wait
+            can still occur when BFS chooses a later train for a better
+            onward connection.
+
+    Stations sharing a name are deduplicated, keeping the stop with the
+    highest ``trains_per_day`` (ties broken by lexicographic stop_id for
+    determinism).
     """
     del hour_filter  # intentionally unused — see docstring
     from logic.geo import PROVINCE_TO_REGION, get_province, haversine_km
@@ -496,8 +526,13 @@ def load_rankings_data(
 
         name = info["name"]
         existing = by_name.get(name)
-        if existing is not None and existing["trains_per_day"] >= trains_per_day:
-            continue
+        if existing is not None:
+            # Keep busier stop; on tie, keep lexicographically-smaller id for
+            # determinism across runs.
+            if existing["trains_per_day"] > trains_per_day:
+                continue
+            if existing["trains_per_day"] == trains_per_day and existing["id"] <= sid:
+                continue
         by_name[name] = {
             "id": sid,
             "name": name,
