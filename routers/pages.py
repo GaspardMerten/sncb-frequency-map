@@ -7,6 +7,7 @@ router = APIRouter()
 PAGES = [
     {"slug": "segments", "title": "Segment Frequency", "icon": "train", "desc": "Train frequencies per track segment"},
     {"slug": "reach", "title": "Station Reach", "icon": "map-pin", "desc": "Reachable stations within a time budget"},
+    {"slug": "rankings", "title": "Station Rankings", "icon": "list-ordered", "desc": "Reach, trains/day, last train, commercial speed"},
     {"slug": "connectivity", "title": "Station Connectivity", "icon": "bar-chart-3", "desc": "Multi-dimensional station comparison"},
     {"slug": "duration", "title": "Travel Duration", "icon": "timer", "desc": "Travel time to any destination"},
     {"slug": "multimodal", "title": "Multimodal Duration", "icon": "bus", "desc": "Door-to-door with all operators"},
@@ -38,6 +39,11 @@ async def segments(request: Request):
 @router.get("/reach")
 async def reach(request: Request):
     return _ctx(request, template="reach.html", page_title="Station Reach")
+
+
+@router.get("/rankings")
+async def rankings(request: Request):
+    return _ctx(request, template="rankings.html", page_title="Station Rankings")
 
 
 @router.get("/connectivity")

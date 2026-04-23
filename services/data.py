@@ -353,6 +353,226 @@ def load_reach_data(
 
 
 @cached(ttl=3600)
+def load_rankings_data(
+    start_date: date,
+    end_date: date,
+    weekdays: tuple[int, ...],
+    hour_filter: tuple[int, int] | None,
+    exclude_pub: bool = False,
+    exclude_sch: bool = False,
+    time_budget: float = 2.0,
+    dep_start: int = 7,
+    dep_end: int = 9,
+    max_transfers: int = 3,
+    min_transfer_time: int = 5,
+    speed_dep_start: int = 8,
+    speed_dep_end: int = 20,
+    top_n: int = 20,
+) -> dict:
+    """Compute per-station rankings: reach, trains/day, last train, commercial speed.
+
+    Returns a payload used by the `/rankings` report page with one row per
+    served Belgian station (served = has at least one active service in
+    the selected date range).
+
+    ``hour_filter`` is accepted for API parity with the other endpoints
+    but NOT applied: trains/day and the last-train metric need the full
+    day, and each sub-metric defines its own hour window
+    (``dep_start``/``dep_end`` for reach, ``speed_dep_start``/
+    ``speed_dep_end`` for commercial speed).
+    """
+    del hour_filter  # intentionally unused — see docstring
+    from logic.geo import PROVINCE_TO_REGION, get_province, haversine_km
+    from logic.reachability import (
+        _bfs_single,
+        _precompute_dep_times,
+        compute_reachability_single,
+    )
+
+    # Hour filter is intentionally ignored here: trains_per_day and the
+    # last-train metric must see the full day. Per-metric windows are
+    # handled separately below.
+    data = load_gtfs_data(
+        start_date, end_date, weekdays, None, exclude_pub, exclude_sch,
+    )
+    if "error" in data:
+        return data
+
+    departures = data["station_departures"]
+    stop_lookup = data["stop_lookup"]
+    prov_geo = data["prov_geo"]
+    segment_freqs = data["segment_freqs"]
+    max_minutes = time_budget * 60
+
+    # Trains per day: max(incoming, outgoing) over daily-averaged segment_freqs.
+    # Last train: max dep_min across all outgoing edges (unfiltered by hour).
+    in_freq: dict[str, float] = defaultdict(float)
+    out_freq: dict[str, float] = defaultdict(float)
+    for (a, b), f in segment_freqs.items():
+        out_freq[a] += f
+        in_freq[b] += f
+
+    last_dep_min: dict[str, int] = {}
+    for src, edges in departures.items():
+        for dep_min, _arr_station, _arr_min, _trip_id in edges:
+            if dep_min > last_dep_min.get(src, -1):
+                last_dep_min[src] = dep_min
+
+    by_name: dict = {}
+    all_sids = set(stop_lookup.keys()) & (set(out_freq) | set(in_freq) | set(departures))
+
+    for sid in all_sids:
+        info = stop_lookup.get(sid)
+        if not info:
+            continue
+
+        trains_per_day = max(out_freq.get(sid, 0.0), in_freq.get(sid, 0.0))
+
+        reachable = compute_reachability_single(
+            sid, departures, max_minutes,
+            max_transfers=max_transfers,
+            transfer_penalty_min=min_transfer_time,
+            departure_window=(dep_start, dep_end),
+        )
+        n_reach = len(reachable)
+
+        ldm = last_dep_min.get(sid, -1)
+        last_str = None
+        if ldm >= 0:
+            hh = int(ldm // 60)
+            mm = int(ldm % 60)
+            last_str = f"{hh:02d}:{mm:02d}" if hh < 24 else f"{hh - 24:02d}:{mm:02d}+1"
+
+        province = get_province(info["lat"], info["lon"], prov_geo)
+        region = PROVINCE_TO_REGION.get(province, "Unknown") if province else "Unknown"
+
+        name = info["name"]
+        existing = by_name.get(name)
+        if existing is not None and existing["trains_per_day"] >= trains_per_day:
+            continue
+        by_name[name] = {
+            "id": sid,
+            "name": name,
+            "lat": info["lat"],
+            "lon": info["lon"],
+            "province": province or "Unknown",
+            "region": region,
+            "reachable": n_reach,
+            "trains_per_day": round(trains_per_day, 1),
+            "last_train_min": ldm if ldm >= 0 else None,
+            "last_train_str": last_str,
+        }
+
+    stations = list(by_name.values())
+
+    # Commercial speed between the top_n busiest stations, over the configured
+    # speed window (default 8h–20h). For each hourly clock start, run a single-
+    # start BFS from origin A and record best arrival at each top-destination B
+    # (waiting at A is counted in the travel time). Average across hours where
+    # B was reachable. speed = haversine(A, B) / avg_time.
+    # This is an approximation — not a true schedule-weighted mean. Pairs with
+    # poor connectivity have an upward travel-time bias because waiting at A
+    # is included.
+    speed_candidates = sorted(
+        stations, key=lambda s: -s["trains_per_day"],
+    )[:top_n]
+    top_name_list = [s["name"] for s in speed_candidates]
+    top_names = set(top_name_list)
+    top_coords = {s["name"]: (s["lat"], s["lon"]) for s in speed_candidates}
+
+    speed_budget_min = 4 * 60
+    starts = list(range(speed_dep_start * 60, speed_dep_end * 60, 60))
+
+    _dep_times = _precompute_dep_times(departures)
+    commercial_speeds = []
+    for origin in speed_candidates:
+        origin_sid = origin["id"]
+        times: dict[str, list[float]] = defaultdict(list)
+        for start_min in starts:
+            r = _bfs_single(
+                origin_sid, departures, speed_budget_min, start_min,
+                max_transfers=max_transfers,
+                transfer_penalty_min=min_transfer_time,
+                _dep_times=_dep_times,
+            )
+            per_name: dict[str, float] = {}
+            for dest_id, info in r.items():
+                d = stop_lookup.get(dest_id)
+                if not d:
+                    continue
+                dname = d["name"]
+                if dname not in top_names or dname == origin["name"]:
+                    continue
+                t = info["travel_time"]
+                if dname not in per_name or t < per_name[dname]:
+                    per_name[dname] = t
+            for dname, t in per_name.items():
+                times[dname].append(t)
+
+        fast = medium = slow = 0
+        pairs = []
+        for dname in top_name_list:
+            if dname == origin["name"]:
+                continue
+            ts = times.get(dname, [])
+            if not ts:
+                pairs.append({
+                    "dest": dname,
+                    "avg_time_min": None,
+                    "distance_km": round(
+                        haversine_km(
+                            origin["lat"], origin["lon"],
+                            *top_coords[dname],
+                        ), 1,
+                    ),
+                    "speed_kmh": None,
+                })
+                continue
+            avg_t = sum(ts) / len(ts)
+            dist = haversine_km(
+                origin["lat"], origin["lon"], *top_coords[dname],
+            )
+            speed = (dist / (avg_t / 60.0)) if avg_t > 0 else 0
+            pairs.append({
+                "dest": dname,
+                "avg_time_min": round(avg_t, 1),
+                "distance_km": round(dist, 1),
+                "speed_kmh": round(speed, 1),
+            })
+            if speed > 80:
+                fast += 1
+            elif speed >= 60:
+                medium += 1
+            else:
+                slow += 1
+
+        commercial_speeds.append({
+            "name": origin["name"],
+            "lat": origin["lat"],
+            "lon": origin["lon"],
+            "region": origin["region"],
+            "province": origin["province"],
+            "trains_per_day": origin["trains_per_day"],
+            "fast_count": fast,
+            "medium_count": medium,
+            "slow_count": slow,
+            "pairs": pairs,
+        })
+
+    commercial_speeds.sort(
+        key=lambda s: (-(s["fast_count"] + s["medium_count"] * 0.5), -s["trains_per_day"]),
+    )
+
+    return {
+        "stations": stations,
+        "commercial_speeds": commercial_speeds,
+        "time_budget": time_budget,
+        "top_n": top_n,
+        "speed_window": [speed_dep_start, speed_dep_end],
+    }
+
+
+@cached(ttl=3600)
 def load_connectivity_data(
     start_date: date,
     end_date: date,
@@ -705,3 +925,142 @@ def load_punctuality_data(target_date: date) -> dict:
         "records": records,
         "station_coords": station_coords,
     }
+
+
+@cached(ttl=3600)
+def load_scheduled_trains(target_date: date) -> dict:
+    """Return GTFS-scheduled SNCB trains for *target_date* — lean shape.
+
+    Output::
+
+        {
+            "trains": {
+                train_no: {
+                    "stops": tuple[str, ...],   # UPPER-CASE station names, in order
+                    "duration_min": float,
+                    "first_dep_hour": int,
+                },
+                ...
+            },
+            "station_coords": {UPPER_NAME: {"lat", "lon"}},  # only Belgium parents
+        }
+
+    Only trains with >=1 commercial stop (GTFS pickup_type=0 or
+    drop_off_type=0) are included.  train_no == GTFS trip_short_name;
+    consumer matches against Infrabel ``train_no``.
+
+    Memory: stop lists are stored as tuples of deduplicated station
+    name strings (interned via a local pool) so a 31-day cache window
+    stays under ~150 MB in practice.
+    """
+    import polars as pl
+
+    ts = noon_timestamp(target_date.year, target_date.month, 15)
+    try:
+        feed = fetch_gtfs(ts, TOKEN)
+    except Exception as e:
+        logger.warning("Failed to fetch GTFS for %s: %s", target_date, e)
+        return {"trains": {}, "station_coords": {}}
+
+    if feed.trips is None or feed.stop_times is None or feed.stops is None:
+        return {"trains": {}, "station_coords": {}}
+
+    sdc = get_service_day_counts(feed, [target_date])
+    active_sids = [s for s, n in sdc.items() if n > 0]
+    if not active_sids:
+        return {"trains": {}, "station_coords": {}}
+
+    trips = feed.trips.filter(pl.col("service_id").is_in(active_sids)).select(
+        ["trip_id", "trip_short_name"],
+    ).filter(
+        pl.col("trip_short_name").is_not_null() & (pl.col("trip_short_name") != ""),
+    )
+    if trips.height == 0:
+        return {"trains": {}, "station_coords": {}}
+
+    parents = feed.stops.filter(pl.col("location_type") == 1).select(
+        pl.col("stop_id").alias("pid"),
+        pl.col("stop_name").alias("parent_name"),
+        pl.col("stop_lat").alias("parent_lat"),
+        pl.col("stop_lon").alias("parent_lon"),
+    )
+    stop_map = feed.stops.select(
+        ["stop_id", "parent_station", "stop_name", "stop_lat",
+         "stop_lon", "location_type"],
+    ).join(parents, left_on="parent_station", right_on="pid", how="left")
+    stop_map = stop_map.with_columns(
+        pl.coalesce(["parent_name", "stop_name"]).alias("station_name"),
+        pl.coalesce(["parent_lat", "stop_lat"]).alias("station_lat"),
+        pl.coalesce(["parent_lon", "stop_lon"]).alias("station_lon"),
+    ).select(["stop_id", "station_name", "station_lat", "station_lon"])
+
+    # Aggregate per-trip in Polars: ordered list of station names + first/last times
+    st = (
+        feed.stop_times
+        .filter((pl.col("pickup_type") == 0) | (pl.col("drop_off_type") == 0))
+        .select(["trip_id", "stop_id", "stop_sequence",
+                 "arrival_time", "departure_time"])
+        .join(trips, on="trip_id")
+        .join(stop_map, on="stop_id")
+        .with_columns(
+            pl.col("arrival_time").dt.total_seconds().alias("arr_sec"),
+            pl.col("departure_time").dt.total_seconds().alias("dep_sec"),
+            pl.col("station_name").str.strip_chars().str.to_uppercase()
+                .alias("station_up"),
+        )
+        .sort(["trip_short_name", "stop_sequence"])
+    )
+
+    agg = st.group_by("trip_short_name").agg(
+        pl.col("station_up").alias("stops"),
+        pl.col("arr_sec").first().alias("arr0"),
+        pl.col("dep_sec").first().alias("dep0"),
+        pl.col("arr_sec").last().alias("arrN"),
+        pl.col("dep_sec").last().alias("depN"),
+    )
+
+    # Build Belgium-only station coord map (parent stations only, small).
+    from logic.geo import is_in_belgium
+    station_coords: dict[str, dict] = {}
+    for row in parents.iter_rows(named=True):
+        lat = row["parent_lat"]
+        lon = row["parent_lon"]
+        name = (row["parent_name"] or "").strip().upper()
+        if not name or lat is None or lon is None:
+            continue
+        if not is_in_belgium(float(lat), float(lon)):
+            continue
+        station_coords.setdefault(name, {"lat": float(lat), "lon": float(lon)})
+
+    # Intern station name strings so repeated occurrences share memory.
+    name_pool: dict[str, str] = {n: n for n in station_coords}
+
+    trains: dict[str, dict] = {}
+    for row in agg.iter_rows(named=True):
+        tn = str(row["trip_short_name"])
+        if not tn:
+            continue
+        raw_stops = row["stops"] or []
+        if not raw_stops:
+            continue
+        stops_tup = tuple(
+            name_pool.setdefault(s, s) for s in raw_stops if s
+        )
+        if not stops_tup:
+            continue
+
+        arr0 = row["arr0"] if row["arr0"] is not None else -1
+        dep0 = row["dep0"] if row["dep0"] is not None else -1
+        arrN = row["arrN"] if row["arrN"] is not None else -1
+        depN = row["depN"] if row["depN"] is not None else -1
+        start = dep0 if dep0 >= 0 else arr0
+        end = arrN if arrN >= 0 else depN
+        duration_sec = max(end - start, 0) if (start >= 0 and end >= 0) else 0
+
+        trains[tn] = {
+            "stops": stops_tup,
+            "duration_min": round(duration_sec / 60, 1),
+            "first_dep_hour": int(start // 3600) if start >= 0 else -1,
+        }
+
+    return {"trains": trains, "station_coords": station_coords}

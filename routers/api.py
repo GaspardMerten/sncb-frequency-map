@@ -42,7 +42,9 @@ from services.data import (
     load_duration_data,
     load_gtfs_data,
     load_punctuality_data,
+    load_rankings_data,
     load_reach_data,
+    load_scheduled_trains,
     load_segments,
     prefetch_punctuality,
 )
@@ -379,6 +381,41 @@ async def api_reach(
         start_date, end_date, _wd(weekdays), _hf(hour_start, hour_end),
         exclude_pub, exclude_sch,
         time_budget, dep_start, dep_end, max_transfers, min_transfer_time,
+    )
+    return JSONResponse(content=result)
+
+
+@router.get("/rankings")
+async def api_rankings(
+    start: str | None = None,
+    end: str | None = None,
+    weekdays: str | None = None,
+    hour_start: int | None = None,
+    hour_end: int | None = None,
+    exclude_pub: bool = False,
+    exclude_sch: bool = False,
+    time_budget: float = 2.0,
+    dep_start: int = 7,
+    dep_end: int = 9,
+    max_transfers: int = 3,
+    min_transfer_time: int = 5,
+    speed_dep_start: int = 8,
+    speed_dep_end: int = 20,
+    top_n: int = 20,
+):
+    """Return multi-metric station rankings for the report page.
+
+    Covers: reach (# stations reachable in `time_budget` hours), trains/day,
+    last evening departure, and commercial speed matrix for the top-N busiest
+    stations.
+    """
+    start_date, end_date = _defaults(start, end)
+    result = await asyncio.to_thread(
+        load_rankings_data,
+        start_date, end_date, _wd(weekdays), _hf(hour_start, hour_end),
+        exclude_pub, exclude_sch,
+        time_budget, dep_start, dep_end, max_transfers, min_transfer_time,
+        speed_dep_start, speed_dep_end, top_n,
     )
     return JSONResponse(content=result)
 
@@ -1804,9 +1841,10 @@ async def api_missed_report(
                 FROM connections WHERE missed = 1
             """).fetchone()
 
-            # 3. Per-station: for each delta (1,2,3,5 min), count local saves,
-            #    downstream new misses, and downstream saves — ALL in SQL
-            opt_result = con.execute("""
+            # 3. Per-pair per-DOW: saves and downstream impact of holding the
+            #    departing train at this station. Grouping includes day-of-week
+            #    so we can detect patterns ("every Monday this arr_train is late").
+            pair_opt = con.execute("""
                 WITH train_route AS (
                     SELECT train_no, day_date, station,
                            ROW_NUMBER() OVER (
@@ -1815,78 +1853,99 @@ async def api_missed_report(
                            ) AS stop_order
                     FROM rec
                 ),
-                -- For each missed connection, the overshoot in seconds
-                missed_detail AS (
-                    SELECT station, dep_train, day_date,
-                           arr_actual - dep_actual AS overshoot_sec
-                    FROM connections WHERE missed = 1
+                -- Per-pair per-DOW occurrence stats (denominator + metadata)
+                pair_dow_totals AS (
+                    SELECT station, arr_train, dep_train, dow,
+                           COUNT(*) AS n_occ,
+                           SUM(missed) AS n_missed,
+                           ANY_VALUE(rel_arr) AS rel_arr,
+                           ANY_VALUE(rel_dep) AS rel_dep,
+                           ANY_VALUE(dep_hour) AS dep_hour,
+                           AVG(gap) / 60.0 AS avg_gap_min
+                    FROM connections
+                    GROUP BY station, arr_train, dep_train, dow
                 ),
-                -- Local saves per (station, delta): missed connections where overshoot <= delta
-                local_saves AS (
-                    SELECT station, delta,
-                           COUNT(*) AS saved_local
+                missed_detail AS (
+                    SELECT station, arr_train, dep_train, dow, day_date,
+                           arr_actual - dep_actual AS overshoot_sec
+                    FROM connections
+                    WHERE missed = 1 AND arr_actual - dep_actual > 0
+                ),
+                -- Local saves per (station, arr_train, dep_train, dow, delta)
+                pair_saves AS (
+                    SELECT station, arr_train, dep_train, dow, delta,
+                           COUNT(*) AS n_saves,
+                           AVG(overshoot_sec) AS avg_overshoot_sec
                     FROM missed_detail
                     CROSS JOIN (VALUES (120),(180),(300)) AS d(delta)
-                    WHERE overshoot_sec > 0 AND overshoot_sec <= delta
-                    GROUP BY station, delta
+                    WHERE overshoot_sec <= delta
+                    GROUP BY station, arr_train, dep_train, dow, delta
                 ),
-                -- Only delay trains from connections actually SAVED by this delta
-                -- (targeted holding, not blanket schedule change)
-                dep_trains_at_station AS (
-                    SELECT DISTINCT md.station AS origin_station, md.dep_train,
-                           md.day_date, d.delta
-                    FROM missed_detail md
-                    CROSS JOIN (VALUES (120),(180),(300)) AS d(delta)
-                    WHERE md.overshoot_sec > 0 AND md.overshoot_sec <= d.delta
+                -- For each (origin_station, dep_train, day_date, dow) where a
+                -- hold could save a connection, walk the remaining route of
+                -- dep_train on that day.
+                candidates AS (
+                    SELECT DISTINCT station AS origin_station, dep_train, day_date, dow
+                    FROM missed_detail
                 ),
-                -- Find downstream stations for each (dep_train, day, origin_station, delta)
                 downstream AS (
-                    SELECT dt.origin_station, dt.dep_train, dt.day_date, dt.delta,
+                    SELECT c.origin_station, c.dep_train, c.day_date, c.dow,
                            tr.station AS downstream_station
-                    FROM dep_trains_at_station dt
-                    JOIN train_route tr ON dt.dep_train = tr.train_no AND dt.day_date = tr.day_date
-                    JOIN train_route tr_origin ON dt.dep_train = tr_origin.train_no
-                         AND dt.day_date = tr_origin.day_date AND tr_origin.station = dt.origin_station
-                    WHERE tr.stop_order > tr_origin.stop_order
+                    FROM candidates c
+                    JOIN train_route tr_origin ON tr_origin.train_no = c.dep_train
+                         AND tr_origin.day_date = c.day_date
+                         AND tr_origin.station = c.origin_station
+                    JOIN train_route tr ON tr.train_no = c.dep_train
+                         AND tr.day_date = c.day_date
+                         AND tr.stop_order > tr_origin.stop_order
                 ),
-                -- At downstream stations, connections where the propagated train ARRIVES
-                -- margin = dep_actual - arr_actual; if margin > 0 and margin <= delta → new miss
+                -- Downstream new misses per (origin_station, dep_train, dow, delta)
                 downstream_arr_impact AS (
-                    SELECT ds.origin_station, ds.delta,
+                    SELECT ds.origin_station, ds.dep_train, ds.dow, dl.delta,
                            COUNT(*) FILTER (
-                               WHERE c.missed = 0
-                               AND (c.dep_actual - c.arr_actual) > 0
-                               AND (c.dep_actual - c.arr_actual) <= ds.delta
+                               WHERE conn.missed = 0
+                               AND (conn.dep_actual - conn.arr_actual) > 0
+                               AND (conn.dep_actual - conn.arr_actual) <= dl.delta
                            ) AS new_misses_downstream
                     FROM downstream ds
-                    JOIN connections c ON c.station = ds.downstream_station
-                         AND c.arr_train = ds.dep_train AND c.day_date = ds.day_date
-                    GROUP BY ds.origin_station, ds.delta
+                    CROSS JOIN (VALUES (120),(180),(300)) AS dl(delta)
+                    JOIN connections conn ON conn.station = ds.downstream_station
+                         AND conn.arr_train = ds.dep_train
+                         AND conn.day_date = ds.day_date
+                    GROUP BY ds.origin_station, ds.dep_train, ds.dow, dl.delta
                 ),
-                -- At downstream stations, connections where the propagated train DEPARTS
-                -- if missed=1 and |margin| <= delta → saved (train departs later = more time)
+                -- Downstream saves (when dep_train is the departing train later and it misses)
                 downstream_dep_impact AS (
-                    SELECT ds.origin_station, ds.delta,
+                    SELECT ds.origin_station, ds.dep_train, ds.dow, dl.delta,
                            COUNT(*) FILTER (
-                               WHERE c.missed = 1
-                               AND (c.arr_actual - c.dep_actual) > 0
-                               AND (c.arr_actual - c.dep_actual) <= ds.delta
+                               WHERE conn.missed = 1
+                               AND (conn.arr_actual - conn.dep_actual) > 0
+                               AND (conn.arr_actual - conn.dep_actual) <= dl.delta
                            ) AS saved_downstream
                     FROM downstream ds
-                    JOIN connections c ON c.station = ds.downstream_station
-                         AND c.dep_train = ds.dep_train AND c.day_date = ds.day_date
-                    GROUP BY ds.origin_station, ds.delta
+                    CROSS JOIN (VALUES (120),(180),(300)) AS dl(delta)
+                    JOIN connections conn ON conn.station = ds.downstream_station
+                         AND conn.dep_train = ds.dep_train
+                         AND conn.day_date = ds.day_date
+                    GROUP BY ds.origin_station, ds.dep_train, ds.dow, dl.delta
                 )
                 SELECT
-                    COALESCE(ls.station, da.origin_station, dd.origin_station) AS station,
-                    COALESCE(ls.delta, da.delta, dd.delta) AS delta,
-                    COALESCE(ls.saved_local, 0) AS saved_local,
+                    ps.station, ps.arr_train, ps.dep_train, ps.dow, ps.delta,
+                    ps.n_saves, ps.avg_overshoot_sec,
+                    pdt.n_occ, pdt.n_missed,
+                    pdt.rel_arr, pdt.rel_dep, pdt.dep_hour, pdt.avg_gap_min,
                     COALESCE(da.new_misses_downstream, 0) AS new_misses_downstream,
                     COALESCE(dd.saved_downstream, 0) AS saved_downstream
-                FROM local_saves ls
-                FULL OUTER JOIN downstream_arr_impact da ON ls.station = da.origin_station AND ls.delta = da.delta
-                FULL OUTER JOIN downstream_dep_impact dd ON COALESCE(ls.station, da.origin_station) = dd.origin_station
-                     AND COALESCE(ls.delta, da.delta) = dd.delta
+                FROM pair_saves ps
+                LEFT JOIN pair_dow_totals pdt
+                     ON ps.station = pdt.station AND ps.arr_train = pdt.arr_train
+                     AND ps.dep_train = pdt.dep_train AND ps.dow = pdt.dow
+                LEFT JOIN downstream_arr_impact da
+                     ON ps.station = da.origin_station AND ps.dep_train = da.dep_train
+                     AND ps.dow = da.dow AND ps.delta = da.delta
+                LEFT JOIN downstream_dep_impact dd
+                     ON ps.station = dd.origin_station AND ps.dep_train = dd.dep_train
+                     AND ps.dow = dd.dow AND ps.delta = dd.delta
             """).fetchdf()
 
             # 4. Quick wins: specific train pairs missed by <120s
@@ -1903,7 +1962,7 @@ async def api_missed_report(
             chunk_opt = {
                 "buf_sens": buf_sens,
                 "barely": barely,
-                "opt_result": opt_result,
+                "pair_opt": pair_opt,
                 "quick_wins": quick_wins_chunk,
             }
             all_opt_data.append(chunk_opt)
@@ -2219,55 +2278,174 @@ async def api_missed_report(
             total_all_missed = sum(c["barely"][1] for c in all_opt_data if c["barely"])
             barely_pct = round(total_barely / max(total_all_missed, 1) * 100, 1)
 
-            # 3. Per-station network simulation: aggregate opt_result across chunks
-            opt_parts = [c["opt_result"] for c in all_opt_data if not c["opt_result"].empty]
+            # 3. Per-pair per-DOW recommendations: for each (station, arr_train,
+            #    dep_train), compare holding dep_train unconditionally vs. only on
+            #    specific days of the week. Emit the option with the best net benefit.
+            pair_parts = [c["pair_opt"] for c in all_opt_data if not c["pair_opt"].empty]
             recommendations = []
-            if opt_parts:
-                opt_all = pd.concat(opt_parts, ignore_index=True)
-                opt_agg = opt_all.groupby(["station", "delta"]).agg(
-                    saved_local=("saved_local", "sum"),
+            if pair_parts:
+                pair_all = pd.concat(pair_parts, ignore_index=True)
+                pair_agg = pair_all.groupby(
+                    ["station", "arr_train", "dep_train", "dow", "delta"], as_index=False
+                ).agg(
+                    n_saves=("n_saves", "sum"),
+                    avg_overshoot_sec=("avg_overshoot_sec", "mean"),
+                    n_occ=("n_occ", "sum"),
+                    n_missed=("n_missed", "sum"),
                     new_misses_downstream=("new_misses_downstream", "sum"),
                     saved_downstream=("saved_downstream", "sum"),
-                ).reset_index()
-                opt_agg["net_benefit"] = (
-                    opt_agg["saved_local"] + opt_agg["saved_downstream"]
-                    - opt_agg["new_misses_downstream"]
+                    rel_arr=("rel_arr", "first"),
+                    rel_dep=("rel_dep", "first"),
+                    dep_hour=("dep_hour", "first"),
+                    avg_gap_min=("avg_gap_min", "mean"),
                 )
-                del opt_all
+                del pair_all
 
-                # Rank stations by impact score (missed * sqrt(pct/100))
-                station_impact = {}
-                for stn in acc_missed:
-                    m = acc_missed[stn]
-                    p = acc_planned.get(stn, 0)
-                    pct = m / max(p, 1) * 100
-                    station_impact[stn] = m * math.sqrt(pct / 100)
-                top_stations = sorted(station_impact, key=lambda s: -station_impact[s])[:15]
+                # Occurrence count per (pair, dow) is constant across delta —
+                # take one row per (pair, dow) for metadata.
+                pair_dow_meta = (
+                    pair_agg.groupby(["station", "arr_train", "dep_train", "dow"], as_index=False)
+                    .agg(
+                        n_occ=("n_occ", "first"),
+                        n_missed=("n_missed", "first"),
+                        rel_arr=("rel_arr", "first"),
+                        rel_dep=("rel_dep", "first"),
+                        dep_hour=("dep_hour", "first"),
+                        avg_gap_min=("avg_gap_min", "first"),
+                    )
+                )
 
-                # For each top station, pick best delta by net_benefit
-                for stn in top_stations:
-                    stn_rows = opt_agg[opt_agg["station"] == stn]
-                    if stn_rows.empty:
+                # For each (pair, delta), summed saves/cost across DOWs = unconditional option
+                unc = (
+                    pair_agg.groupby(["station", "arr_train", "dep_train", "delta"], as_index=False)
+                    .agg(
+                        n_saves=("n_saves", "sum"),
+                        new_misses_downstream=("new_misses_downstream", "sum"),
+                        saved_downstream=("saved_downstream", "sum"),
+                        avg_overshoot_sec=("avg_overshoot_sec", "mean"),
+                    )
+                )
+                unc["net_benefit"] = (
+                    unc["n_saves"] + unc["saved_downstream"] - unc["new_misses_downstream"]
+                )
+
+                # Per-(pair, delta, dow) net benefit for DOW-conditional option
+                pair_agg["net_benefit"] = (
+                    pair_agg["n_saves"] + pair_agg["saved_downstream"]
+                    - pair_agg["new_misses_downstream"]
+                )
+
+                # Total misses + total occ per pair (for ranking + pattern context)
+                pair_totals = (
+                    pair_dow_meta.groupby(["station", "arr_train", "dep_train"], as_index=False)
+                    .agg(
+                        total_occ=("n_occ", "sum"),
+                        total_missed=("n_missed", "sum"),
+                    )
+                )
+                pair_totals_map = {
+                    (r["station"], r["arr_train"], r["dep_train"]):
+                        (int(r["total_occ"]), int(r["total_missed"]))
+                    for _, r in pair_totals.iterrows()
+                }
+
+                # Pick best option per (station, arr_train, dep_train).
+                # Filter: pair must have at least 2 misses and non-trivial net benefit.
+                MIN_NET = 2
+                for (stn, at, dt), pair_rows in pair_agg.groupby(
+                    ["station", "arr_train", "dep_train"], sort=False
+                ):
+                    total_occ, total_missed = pair_totals_map.get((stn, at, dt), (0, 0))
+                    if total_missed < 2:
                         continue
-                    best_row = stn_rows.loc[stn_rows["net_benefit"].idxmax()]
-                    net = int(best_row["net_benefit"])
-                    if net <= 0:
+
+                    # Best unconditional (across all DOWs)
+                    unc_rows = unc[
+                        (unc["station"] == stn)
+                        & (unc["arr_train"] == at)
+                        & (unc["dep_train"] == dt)
+                    ]
+                    best_unc = (
+                        unc_rows.loc[unc_rows["net_benefit"].idxmax()]
+                        if not unc_rows.empty else None
+                    )
+
+                    # Best DOW-conditional — only trust if that DOW has >= 2 occurrences
+                    # of this pair (otherwise sample-of-one is too noisy)
+                    dow_meta_rows = pair_dow_meta[
+                        (pair_dow_meta["station"] == stn)
+                        & (pair_dow_meta["arr_train"] == at)
+                        & (pair_dow_meta["dep_train"] == dt)
+                    ]
+                    dow_occ_map = {
+                        int(r["dow"]): int(r["n_occ"])
+                        for _, r in dow_meta_rows.iterrows()
+                    }
+                    pair_rows_solid = pair_rows[
+                        pair_rows["dow"].map(lambda d: dow_occ_map.get(int(d), 0) >= 2)
+                    ]
+                    best_dow = (
+                        pair_rows_solid.loc[pair_rows_solid["net_benefit"].idxmax()]
+                        if not pair_rows_solid.empty else None
+                    )
+
+                    # Choose the winner
+                    unc_net = int(best_unc["net_benefit"]) if best_unc is not None else -999
+                    dow_net = int(best_dow["net_benefit"]) if best_dow is not None else -999
+                    if max(unc_net, dow_net) < MIN_NET:
                         continue
-                    total_missed_here = acc_missed.get(stn, 0)
-                    total_planned_here = acc_planned.get(stn, 0)
+
+                    # Prefer unconditional unless a single DOW saves notably more
+                    # (>= 50% more net benefit, or unc is <=0)
+                    use_dow = best_dow is not None and (
+                        dow_net > unc_net * 1.5 or unc_net < MIN_NET
+                    )
+                    chosen = best_dow if use_dow else best_unc
+
+                    dow_val = int(chosen["dow"]) if use_dow else None
+                    meta_rows = dow_meta_rows
+                    # Metadata: use matching dow row for conditional, else most-populous
+                    if use_dow:
+                        meta_row = meta_rows[meta_rows["dow"] == dow_val]
+                        meta_row = meta_row.iloc[0] if not meta_row.empty else meta_rows.iloc[0]
+                    else:
+                        meta_row = meta_rows.loc[meta_rows["n_missed"].idxmax()]
+
+                    # DOW concentration: fraction of misses on top DOW
+                    total_pair_missed = meta_rows["n_missed"].sum()
+                    top_dow_row = meta_rows.loc[meta_rows["n_missed"].idxmax()]
+                    top_dow = int(top_dow_row["dow"])
+                    top_dow_missed = int(top_dow_row["n_missed"])
+                    dow_concentration_pct = (
+                        round(top_dow_missed / max(total_pair_missed, 1) * 100, 0)
+                    )
+
                     recommendations.append({
                         "station": stn,
-                        "total_missed": total_missed_here,
-                        "total_planned": total_planned_here,
-                        "pct_missed": round(total_missed_here / max(total_planned_here, 1) * 100, 1),
-                        "delta_min": int(best_row["delta"]) // 60,
-                        "saved_local": int(best_row["saved_local"]),
-                        "new_misses_downstream": int(best_row["new_misses_downstream"]),
-                        "saved_downstream": int(best_row["saved_downstream"]),
-                        "net_benefit": net,
-                        "net_pct_of_station": round(net / max(total_missed_here, 1) * 100, 1),
+                        "arr_train": at,
+                        "dep_train": dt,
+                        "rel_arr": str(meta_row.get("rel_arr") or ""),
+                        "rel_dep": str(meta_row.get("rel_dep") or ""),
+                        "dep_hour": int(meta_row["dep_hour"]) if pd.notna(meta_row["dep_hour"]) else None,
+                        "avg_gap_min": round(float(meta_row["avg_gap_min"]), 1)
+                            if pd.notna(meta_row["avg_gap_min"]) else None,
+                        "delta_min": int(chosen["delta"]) // 60,
+                        "n_saves": int(chosen["n_saves"]),
+                        "new_misses_downstream": int(chosen["new_misses_downstream"]),
+                        "saved_downstream": int(chosen["saved_downstream"]),
+                        "net_benefit": int(chosen["net_benefit"]),
+                        "avg_overshoot_sec": round(float(chosen["avg_overshoot_sec"]), 0)
+                            if pd.notna(chosen["avg_overshoot_sec"]) else 0,
+                        "dow": dow_val,
+                        "dow_label": _DOW_LABELS[dow_val] if dow_val is not None else None,
+                        "pair_total_missed": int(total_missed),
+                        "pair_total_occ": int(total_occ),
+                        "top_dow": top_dow,
+                        "top_dow_label": _DOW_LABELS[top_dow],
+                        "dow_concentration_pct": dow_concentration_pct,
                     })
-                del opt_agg
+
+                del pair_agg, pair_dow_meta, unc
 
             recommendations.sort(key=lambda x: -x["net_benefit"])
 
@@ -2876,3 +3054,219 @@ async def api_weather_delay(
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
+
+
+# ---------------------------------------------------------------------------
+# Deleted trains: GTFS scheduled - Infrabel observed = deleted
+# ---------------------------------------------------------------------------
+
+
+@router.get("/deleted")
+async def api_deleted(
+    start: str | None = None,
+    end: str | None = None,
+    weekdays: str | None = None,
+    exclude_pub: bool = False,
+    exclude_sch: bool = False,
+    min_stops: int = 2,
+):
+    """Trains scheduled in GTFS but not observed in Infrabel punctuality.
+
+    Streams SSE progress during GTFS/punctuality fetch, then a result event
+    with aggregated metrics on deleted trains.
+    """
+    import queue
+    from starlette.responses import StreamingResponse
+
+    progress_q: queue.Queue[tuple[int, int, str] | None] = queue.Queue()
+
+    def _compute():
+        start_date, end_date = _defaults(start, end, days_back=7)
+        n_days_raw = (end_date - start_date).days + 1
+        if n_days_raw < 1:
+            return {"error": "Invalid date range"}
+        if n_days_raw > 31:
+            return {"error": "Max 31 days"}
+
+        allowed_weekdays = _wd(weekdays)
+        all_dates = _filter_dates(start_date, end_date, allowed_weekdays,
+                                  exclude_pub, exclude_sch)
+        if not all_dates:
+            return {"error": "No dates match filters"}
+        n_days = len(all_dates)
+
+        # Prefetch punctuality for all dates in parallel
+        progress_q.put((0, n_days, "fetch"))
+        prefetch_punctuality(
+            all_dates,
+            on_progress=lambda done, total: progress_q.put((done, total, "fetch")),
+        )
+
+        n_scheduled_total = 0
+        n_deleted_total = 0
+        impacted_time_min = 0.0
+        impacted_stops_total = 0
+        station_counts: dict[str, int] = defaultdict(int)
+        station_coords: dict[str, dict] = {}
+        segment_counts: dict[tuple[str, str], int] = defaultdict(int)
+        hour_deleted: dict[int, int] = defaultdict(int)
+        hour_scheduled: dict[int, int] = defaultdict(int)
+        daily: list[dict] = []
+        trains_out: list[dict] = []
+
+        for di, d in enumerate(all_dates):
+            progress_q.put((di + 1, n_days, "process"))
+
+            sched = load_scheduled_trains(d)
+            sched_trains = sched.get("trains") or {}
+            for name, coords in (sched.get("station_coords") or {}).items():
+                station_coords.setdefault(name, coords)
+
+            punc = load_punctuality_data(d)
+            if "error" in punc:
+                continue
+            for name, coords in (punc.get("station_coords") or {}).items():
+                station_coords.setdefault(name, coords)
+
+            # Observed SNCB train numbers for this date
+            observed: set[str] = set()
+            for r in punc.get("records") or []:
+                if r.get("train_serv") != "SNCB/NMBS":
+                    continue
+                tn = r.get("train_no")
+                if tn is None:
+                    continue
+                observed.add(str(tn))
+
+            n_sched_day = 0
+            n_deleted_day = 0
+            for tn, info in sched_trains.items():
+                stops = info.get("stops") or []
+                if len(stops) < min_stops:
+                    continue
+                n_sched_day += 1
+                hr = info.get("first_dep_hour", -1)
+                if hr >= 0:
+                    hour_scheduled[hr] += 1
+                if tn in observed:
+                    continue
+                # Deleted train
+                n_deleted_day += 1
+                dur = float(info.get("duration_min", 0) or 0)
+                impacted_time_min += dur
+                impacted_stops_total += len(stops)
+                if hr >= 0:
+                    hour_deleted[hr] += 1
+
+                prev_name = None
+                for sname in stops:
+                    if not sname:
+                        continue
+                    station_counts[sname] += 1
+                    if prev_name and prev_name != sname:
+                        key = tuple(sorted([prev_name, sname]))
+                        segment_counts[key] += 1
+                    prev_name = sname
+
+                if len(trains_out) < 500:
+                    trains_out.append({
+                        "train_no": tn,
+                        "date": d.isoformat(),
+                        "duration_min": round(dur, 1),
+                        "n_stops": len(stops),
+                        "first_station": stops[0],
+                        "last_station": stops[-1],
+                        "first_dep_hour": hr,
+                    })
+
+            n_scheduled_total += n_sched_day
+            n_deleted_total += n_deleted_day
+            daily.append({
+                "date": d.isoformat(),
+                "scheduled": n_sched_day,
+                "deleted": n_deleted_day,
+                "pct_deleted": round(n_deleted_day / max(n_sched_day, 1) * 100, 2),
+            })
+
+        # Build stations list (most impacted)
+        stations_list = []
+        for name, count in station_counts.items():
+            entry: dict = {"name": name, "count": count}
+            coords = station_coords.get(name)
+            if coords:
+                entry["lat"] = coords["lat"]
+                entry["lon"] = coords["lon"]
+            stations_list.append(entry)
+        stations_list.sort(key=lambda s: -s["count"])
+
+        # Build segments list (most impacted)
+        segments_list = []
+        for (a, b), count in segment_counts.items():
+            entry = {"a": a, "b": b, "count": count}
+            ca = station_coords.get(a)
+            cb = station_coords.get(b)
+            if ca and cb:
+                entry["a_lat"] = ca["lat"]
+                entry["a_lon"] = ca["lon"]
+                entry["b_lat"] = cb["lat"]
+                entry["b_lon"] = cb["lon"]
+            segments_list.append(entry)
+        segments_list.sort(key=lambda s: -s["count"])
+
+        # Hourly breakdown
+        hourly = []
+        for h in range(24):
+            sched_h = hour_scheduled.get(h, 0)
+            del_h = hour_deleted.get(h, 0)
+            hourly.append({
+                "hour": h,
+                "scheduled": sched_h,
+                "deleted": del_h,
+                "pct_deleted": round(del_h / max(sched_h, 1) * 100, 2),
+            })
+
+        # Sort deleted trains by duration (biggest impact first)
+        trains_out.sort(key=lambda t: -t["duration_min"])
+
+        pct_deleted = round(
+            n_deleted_total / max(n_scheduled_total, 1) * 100, 2,
+        )
+
+        return {
+            "n_days": n_days,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "n_scheduled": n_scheduled_total,
+            "n_deleted": n_deleted_total,
+            "pct_deleted": pct_deleted,
+            "impacted_time_min": round(impacted_time_min, 1),
+            "impacted_stops": impacted_stops_total,
+            "stations": stations_list[:100],
+            "segments": segments_list[:100],
+            "hourly": hourly,
+            "daily": daily,
+            "trains": trains_out[:200],
+        }
+
+    async def _stream():
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, _compute)
+
+        while True:
+            try:
+                item = await asyncio.to_thread(progress_q.get, timeout=0.3)
+            except Exception:
+                if future.done():
+                    break
+                continue
+            if item is None:
+                break
+            done, total, phase = item
+            payload = json.dumps({"done": done, "total": total, "phase": phase})
+            yield f"event: progress\ndata: {payload}\n\n"
+
+        result = await future
+        result_payload = json.dumps(result, cls=_NumpyEncoder)
+        yield f"event: result\ndata: {result_payload}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
