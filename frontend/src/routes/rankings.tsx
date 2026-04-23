@@ -67,7 +67,7 @@ const REGION_COLORS: Record<string, string> = {
 const regionColor = (r: string) => REGION_COLORS[r] ?? REGION_COLORS.Unknown;
 
 type ReachTab = "all" | "xl" | "lm" | "s";
-type TrainTab = "all" | "xl" | "l" | "m" | "s";
+type TrainTab = "all" | "xl" | "m" | "s";
 type SortKey = "name" | "reachable" | "trains_per_day" | "last_train_min";
 
 function filterReach(list: RankingStation[], tab: ReachTab): RankingStation[] {
@@ -77,10 +77,9 @@ function filterReach(list: RankingStation[], tab: ReachTab): RankingStation[] {
   return list;
 }
 function filterTrains(list: RankingStation[], tab: TrainTab): RankingStation[] {
-  if (tab === "xl") return list.filter((s) => s.trains_per_day > 250);
-  if (tab === "l") return list.filter((s) => s.trains_per_day >= 50 && s.trains_per_day <= 250);
-  if (tab === "m") return list.filter((s) => s.trains_per_day >= 20 && s.trains_per_day < 50);
-  if (tab === "s") return list.filter((s) => s.trains_per_day < 20);
+  if (tab === "xl") return list.filter((s) => s.trains_per_day > 80);
+  if (tab === "m") return list.filter((s) => s.trains_per_day >= 30 && s.trains_per_day <= 80);
+  if (tab === "s") return list.filter((s) => s.trains_per_day < 30);
   return list;
 }
 
@@ -359,10 +358,9 @@ function RankingsPage() {
               <Tabs value={trainTab} onValueChange={(v) => setTrainTab(v as TrainTab)}>
                 <TabsList>
                   <TabsTrigger value="all">All</TabsTrigger>
-                  <TabsTrigger value="xl">XL (&gt; 250)</TabsTrigger>
-                  <TabsTrigger value="l">L (50–250)</TabsTrigger>
-                  <TabsTrigger value="m">M (20–50)</TabsTrigger>
-                  <TabsTrigger value="s">S (&lt; 20)</TabsTrigger>
+                  <TabsTrigger value="xl">&gt; 80</TabsTrigger>
+                  <TabsTrigger value="m">30–80</TabsTrigger>
+                  <TabsTrigger value="s">&lt; 30</TabsTrigger>
                 </TabsList>
               </Tabs>
             </div>
@@ -394,10 +392,9 @@ function RankingsPage() {
               <Tabs value={lastTab} onValueChange={(v) => setLastTab(v as TrainTab)}>
                 <TabsList>
                   <TabsTrigger value="all">All</TabsTrigger>
-                  <TabsTrigger value="xl">XL (&gt; 250)</TabsTrigger>
-                  <TabsTrigger value="l">L (50–250)</TabsTrigger>
-                  <TabsTrigger value="m">M (20–50)</TabsTrigger>
-                  <TabsTrigger value="s">S (&lt; 20)</TabsTrigger>
+                  <TabsTrigger value="xl">&gt; 80</TabsTrigger>
+                  <TabsTrigger value="m">30–80</TabsTrigger>
+                  <TabsTrigger value="s">&lt; 30</TabsTrigger>
                 </TabsList>
               </Tabs>
             </div>
